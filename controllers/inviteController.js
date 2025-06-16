@@ -1,7 +1,7 @@
 const Invite = require('../models/invite');
 const User = require('../models/user');
 const Property = require('../models/property');
-const PropertyUser = require('../models/PropertyUser');
+const PropertyUser = require('../models/propertyUser');
 const Unit = require('../models/unit');
 const asyncHandler = require('express-async-handler');
 const { generateUniqueToken, generateExpirationDate } = require('../utils/inviteGenerator');
