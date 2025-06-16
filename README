@@ -1,0 +1,236 @@
+# FixIt Backend
+
+This is the backend API for **FixIt**, a MERN-stack property maintenance and management platform. The backend is built with Node.js, Express, and MongoDB (via Mongoose), and provides a RESTful API for authentication, user/role management, maintenance requests, scheduled maintenance, notifications, and more.
+
+---
+
+## Table of Contents
+
+- [Features](#features)
+- [Tech Stack](#tech-stack)
+- [Getting Started](#getting-started)
+- [Environment Variables](#environment-variables)
+- [Available Scripts](#available-scripts)
+- [API Overview](#api-overview)
+- [File Structure](#file-structure)
+- [Contributing](#contributing)
+- [License](#license)
+
+---
+
+## Features
+
+- **User Authentication** (JWT-based)
+- **Role Management:** Admin, Landlord, Property Manager, Tenant, Vendor
+- **Property Management:** Create/manage properties, units, and user roles
+- **Maintenance Requests:** Tenants can create, comment on, and track requests
+- **Scheduled Maintenance:** Manage recurring/non-recurring tasks
+- **Notifications:** In-app notifications for events (assignment, status updates, etc.)
+- **Audit Logging:** Tracks key actions for admin visibility
+- **Reports:** Generate and export (CSV) maintenance and activity reports
+- **Email Integration:** Password reset and notifications via email
+
+---
+
+## Tech Stack
+
+- **Node.js** & **Express** (REST API)
+- **MongoDB** with **Mongoose** (ODM)
+- **JWT** for authentication
+- **Bcrypt** for password hashing
+- **Nodemailer** for email
+- **Helmet** & **CORS** for security
+- **Express-rate-limit** for basic rate limiting
+- **Morgan** for logging
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+- [Node.js (18+ recommended)](https://nodejs.org/)
+- [MongoDB Atlas account](https://www.mongodb.com/cloud/atlas) or local MongoDB instance
+
+### Installation
+
+1. **Clone the repository:**
+   ```bash
+   git clone <repo-url>
+   cd fixit-backend
+
+
+
+   ```markdown name=README.md
+# FixIt Backend
+
+This is the backend API for **FixIt**, a MERN-stack property maintenance and management platform. The backend is built with Node.js, Express, and MongoDB (via Mongoose), and provides a RESTful API for authentication, user/role management, maintenance requests, scheduled maintenance, notifications, and more.
+
+---
+
+## Table of Contents
+
+- [Features](#features)
+- [Tech Stack](#tech-stack)
+- [Getting Started](#getting-started)
+- [Environment Variables](#environment-variables)
+- [Available Scripts](#available-scripts)
+- [API Overview](#api-overview)
+- [File Structure](#file-structure)
+- [Contributing](#contributing)
+- [License](#license)
+
+---
+
+## Features
+
+- **User Authentication** (JWT-based)
+- **Role Management:** Admin, Landlord, Property Manager, Tenant, Vendor
+- **Property Management:** Create/manage properties, units, and user roles
+- **Maintenance Requests:** Tenants can create, comment on, and track requests
+- **Scheduled Maintenance:** Manage recurring/non-recurring tasks
+- **Notifications:** In-app notifications for events (assignment, status updates, etc.)
+- **Audit Logging:** Tracks key actions for admin visibility
+- **Reports:** Generate and export (CSV) maintenance and activity reports
+- **Email Integration:** Password reset and notifications via email
+
+---
+
+## Tech Stack
+
+- **Node.js** & **Express** (REST API)
+- **MongoDB** with **Mongoose** (ODM)
+- **JWT** for authentication
+- **Bcrypt** for password hashing
+- **Nodemailer** for email
+- **Helmet** & **CORS** for security
+- **Express-rate-limit** for basic rate limiting
+- **Morgan** for logging
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+- [Node.js (18+ recommended)](https://nodejs.org/)
+- [MongoDB Atlas account](https://www.mongodb.com/cloud/atlas) or local MongoDB instance
+
+### Installation
+
+1. **Clone the repository:**
+   ```bash
+   git clone <repo-url>
+   cd fixit-backend
+   ```
+
+2. **Install dependencies:**
+   ```bash
+   npm install
+   ```
+
+3. **Set up environment variables:**
+   - Copy `.env.example` to `.env` and fill in your values (see [Environment Variables](#environment-variables) below).
+
+4. **Start the server:**
+   ```bash
+   npm run dev
+   # or
+   npm start
+   ```
+
+---
+
+## Environment Variables
+
+Create a `.env` file in the root with the following keys:
+
+```env
+MONGO_URI=mongodb+srv://<username>:<password>@<cluster-url>/<db>?retryWrites=true&w=majority
+JWT_SECRET=your_jwt_secret
+EMAIL_USER=your_email@gmail.com
+EMAIL_PASS=your_email_password
+VITE_API_URL=http://localhost:5000
+VITE_ADMIN_TOKEN=your_admin_token
+```
+
+---
+
+## Available Scripts
+
+- `npm run dev` - Start server with Nodemon (development)
+- `npm start` - Start server (production)
+- `npm test` - (No tests yet)
+
+---
+
+## API Overview
+
+### Main Endpoints
+
+| Endpoint                      | Description                                  |
+|-------------------------------|----------------------------------------------|
+| `POST /api/auth/register`     | Register new user                            |
+| `POST /api/auth/login`        | User login                                   |
+| `POST /api/auth/forgot-password` | Request password reset                     |
+| `POST /api/auth/reset-password`  | Reset password                             |
+| `GET /api/properties`         | List/search properties (role-based)          |
+| `POST /api/properties/create` | Create new property (landlord/manager)       |
+| `POST /api/requests/create`   | Create maintenance request (tenant)          |
+| `GET /api/requests/mine`      | List my requests (tenant/manager)            |
+| `POST /api/comments`          | Add comment to context (request, etc.)       |
+| `GET /api/notifications`      | Get my notifications                        |
+| `GET /api/admin/stats`        | Admin dashboard stats (admin)                |
+| ...                           | ...and more (see routes folder)              |
+
+- All endpoints are **JWT protected** unless otherwise noted.
+
+---
+
+## File Structure
+
+```
+fixit-backend/
+├── config/
+│   └── db.js
+├── controllers/
+│   └── ...Controller.js
+├── middleware/
+│   └── authMiddleware.js
+├── models/
+│   └── ...model.js
+├── routes/
+│   └── ...Routes.js
+├── utils/
+│   └── sendEmail.js
+│   └── sendNotification.js
+├── .env.example
+├── package.json
+└── server.js
+```
+
+---
+
+## Contributing
+
+1. Fork this repo
+2. Create your feature branch (`git checkout -b feature/awesome-feature`)
+3. Commit your changes
+4. Push to the branch (`git push origin feature/awesome-feature`)
+5. Open a PR
+
+---
+
+## License
+
+[ISC](LICENSE)
+
+---
+
+## Contact
+
+Raymond Kirungi  
+[Email](mailto:kirungiryanahaisibwe@gmail.com)
+```
+Let me know if you want to customize for deployment, documentation for specific endpoints, or add more details!
+```

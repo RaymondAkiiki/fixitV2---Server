@@ -1,0 +1,22 @@
+# node and build
+node_modules/
+dist/
+
+# environment variables
+.env
+.env.local
+
+# system
+.DS_Store
+
+# logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# database (if using local dev dbs or backups)
+*.sqlite
+*.db
+*.bak
