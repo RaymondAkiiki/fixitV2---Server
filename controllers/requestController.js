@@ -484,8 +484,9 @@ exports.assignRequest = asyncHandler(async (req, res) => {
  */
 exports.uploadMedia = asyncHandler(async (req, res) => {
     const requestId = req.params.id;
-    const mediaUrls = req.files.map(file => file.path); // Assuming files are already uploaded to Cloudinary
-
+    const mediaFiles = Array.isArray(req.files) ? req.files : [];
+    const mediaUrls = mediaFiles.map(file => file.path);
+    console.log('req.files:', req.files);
     if (!mediaUrls || mediaUrls.length === 0) {
         res.status(400);
         throw new Error('No media files uploaded.');
