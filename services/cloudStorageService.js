@@ -4,11 +4,15 @@ const cloudinary = require('../config/cloudinary'); // Import the pre-configured
 const logger = require('../utils/logger'); // Import the logger utility
 const AppError = require('../utils/AppError'); // For consistent error handling
 
+// Check if Cloudinary is configured
+const isCloudinaryConfigured = () => {
+    return cloudinary.config().cloud_name && cloudinary.config().api_key && cloudinary.config().api_secret;
+};
+
 // Validate Cloudinary configuration at this level as a safeguard,
 // though the primary validation should be in config/cloudinary.js
-if (!cloudinary.config().cloud_name || !cloudinary.config().api_key || !cloudinary.config().api_secret) {
-    logger.error("CloudStorageService: CRITICAL ERROR: Cloudinary is not configured. Check CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET in .env variables.");
-    throw new AppError("Cloudinary configuration incomplete. Cannot proceed with file operations.", 500);
+if (!isCloudinaryConfigured()) {
+    logger.warn("CloudStorageService: Cloudinary is not configured. File upload functionality will be disabled.");
 }
 
 /**
@@ -25,6 +29,11 @@ if (!cloudinary.config().cloud_name || !cloudinary.config().api_key || !cloudina
  * @throws {AppError} If the upload fails.
  */
 const uploadFileBuffer = async (fileBuffer, mimeType, originalname, folder = 'lease_logix/general', options = {}) => {
+    if (!isCloudinaryConfigured()) {
+        logger.warn('File upload attempted but Cloudinary is not configured');
+        throw new AppError('File upload is disabled - Cloudinary not configured', 503);
+    }
+    
     try {
         // Convert buffer to base64 string for Cloudinary upload
         const base64File = `data:${mimeType};base64,${fileBuffer.toString('base64')}`;
@@ -68,6 +77,11 @@ const uploadFileBuffer = async (fileBuffer, mimeType, originalname, folder = 'le
  * @throws {AppError} If deletion fails.
  */
 const deleteFile = async (publicId, resourceType = 'image') => {
+    if (!isCloudinaryConfigured()) {
+        logger.warn('File deletion attempted but Cloudinary is not configured');
+        throw new AppError('File deletion is disabled - Cloudinary not configured', 503);
+    }
+    
     if (!publicId) {
         throw new AppError("Public ID is required to delete a file.", 400);
     }
@@ -104,6 +118,11 @@ const deleteFile = async (publicId, resourceType = 'image') => {
  * @throws {AppError} If publicId is missing.
  */
 const getFileUrl = (publicId, options = {}) => {
+    if (!isCloudinaryConfigured()) {
+        logger.warn('File URL generation attempted but Cloudinary is not configured');
+        throw new AppError('File URL generation is disabled - Cloudinary not configured', 503);
+    }
+    
     if (!publicId) {
         throw new AppError("Public ID is required to get file URL.", 400);
     }
@@ -113,5 +132,6 @@ const getFileUrl = (publicId, options = {}) => {
 module.exports = {
     uploadFileBuffer,
     deleteFile,
-    getFileUrl
+    getFileUrl,
+    isCloudinaryConfigured
 };

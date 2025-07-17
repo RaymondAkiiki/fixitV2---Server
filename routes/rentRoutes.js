@@ -2,7 +2,7 @@
 
 const express = require('express');
 const router = express.Router();
-const rentController = require('../controllers/rentController'); // Import controller
+const rentController = require('../controllers/RentController'); // Import controller
 const { protect, authorizeRoles } = require('../middleware/authMiddleware'); // Import auth middleware
 const { upload } = require('../middleware/uploadMiddleware'); // For single file uploads
 const { validateMongoId, validateResult } = require('../utils/validationUtils'); // Import validation utilities
