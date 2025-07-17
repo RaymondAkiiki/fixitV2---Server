@@ -2,6 +2,7 @@ const asyncHandler = require('../utils/asyncHandler');
 const authService = require('../services/authService');
 const logger = require('../utils/logger');
 const AppError = require('../utils/AppError');
+const { getUserProfile } = require('./userController'); // Import getUserProfile
 
 /**
  * @desc Register a new user (classic)
@@ -42,6 +43,18 @@ const loginUser = asyncHandler(async (req, res) => {
         accessToken
     });
 });
+
+/**
+ * @desc Get current authenticated user
+ * @route GET /api/auth/me
+ * @access Private
+ */
+const getMe = asyncHandler(async (req, res) => {
+    // This function will now handle the GET /api/auth/me route
+    // It reuses the logic from userController.getUserProfile
+    await getUserProfile(req, res);
+});
+
 
 /**
  * @desc Authenticate or register a user via Google OAuth
@@ -184,6 +197,7 @@ const sendVerificationEmail = asyncHandler(async (req, res) => {
 module.exports = {
     registerUser,
     loginUser,
+    getMe, // Export the new function
     loginWithGoogle,
     logoutUser,
     changePassword,

@@ -16,7 +16,9 @@ const auditLogSchema = new mongoose.Schema({
   action: {
     type: String,
     required: true,
-    enum: AUDIT_ACTION_ENUM,
+    // --- THIS IS THE CRITICAL FIX ---
+    // Use Object.values() to provide an array of allowed strings to the enum validator.
+    enum: Object.values(AUDIT_ACTION_ENUM),
   },
   description: {
     type: String,
@@ -29,8 +31,8 @@ const auditLogSchema = new mongoose.Schema({
     default: null,
   },
   resourceId: {
+    // This can refer to any model, so we don't set a hard 'ref'
     type: mongoose.Schema.Types.ObjectId,
-    refPath: 'resourceType',
     default: null,
   },
   oldValue: {

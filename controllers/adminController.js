@@ -106,7 +106,14 @@ exports.getDashboardStatistics = async (req, res) => {
             usersByRole: usersByRoleAgg.reduce((acc, item) => ({ ...acc, [item.role]: item.count }), {}),
         };
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.SYSTEM_EVENT, 'Accessed dashboard statistics', AUDIT_RESOURCE_TYPE_ENUM.System, null, null, stats);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.SYSTEM_EVENT,
+            description: 'Accessed dashboard statistics',
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.System,
+            status: 'success',
+            metadata: stats
+        });
         res.status(200).json({ success: true, data: stats });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to fetch dashboard statistics.', err);
@@ -127,7 +134,13 @@ exports.getCurrentAdminUser = async (req, res) => {
         if (!adminUser) {
             return sendErrorResponse(res, 404, "Admin user not found.");
         }
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.LOGIN, 'Accessed own admin profile', AUDIT_RESOURCE_TYPE_ENUM.User, null, adminUser);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.LOGIN,
+            description: 'Accessed own admin profile',
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.User,
+            newValue: adminUser
+        });
         res.status(200).json({ success: true, data: adminUser });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to retrieve admin user details.', err);
@@ -165,7 +178,13 @@ exports.getAllUsers = async (req, res) => {
 
         const totalUsers = await User.countDocuments(query);
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.READ, 'Viewed all users', AUDIT_RESOURCE_TYPE_ENUM.User, null, { query, count: users.length });
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.READ,
+            description: 'Viewed all users',
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.User,
+            newValue: { query, count: users.length }
+        });
         res.status(200).json({ success: true, count: users.length, total: totalUsers, page: parseInt(page), limit: parseInt(limit), data: users });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to fetch users.', err);
@@ -183,7 +202,13 @@ exports.getUserById = async (req, res) => {
         if (!user) {
             return sendErrorResponse(res, 404, 'User not found.');
         }
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.READ, `Viewed user ${user.email}`, AUDIT_RESOURCE_TYPE_ENUM.User, null, user);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.READ,
+            description: `Viewed user ${user.email}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.User,
+            newValue: user
+        });
         res.status(200).json({ success: true, data: user });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to fetch user details.', err);
@@ -213,7 +238,13 @@ exports.createUser = [
                 role: role || 'tenant' // Default role
             });
 
-            createAuditLog(req.user.id, AUDIT_ACTION_ENUM.USER_CREATED, `Created new user ${newUser.email} with role ${newUser.role}`, AUDIT_RESOURCE_TYPE_ENUM.User, null, newUser);
+            await createAuditLog({
+                user: req.user.id,
+                action: AUDIT_ACTION_ENUM.USER_CREATED,
+                description: `Created new user ${newUser.email} with role ${newUser.role}`,
+                resourceType: AUDIT_RESOURCE_TYPE_ENUM.User,
+                newValue: newUser
+            });
             res.status(201).json({ success: true, data: newUser });
         } catch (err) {
             sendErrorResponse(res, 400, err.message, err); // Use 400 for validation/business logic errors from service
@@ -256,7 +287,14 @@ exports.updateUser = async (req, res) => {
 
         await user.save({ validateBeforeSave: true }); // Validate on save
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.USER_UPDATED, `Updated user ${user.email}`, AUDIT_RESOURCE_TYPE_ENUM.User, oldUser, user);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.USER_UPDATED,
+            description: `Updated user ${user.email}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.User,
+            oldValue: oldUser,
+            newValue: user
+        });
         res.status(200).json({ success: true, data: user });
     } catch (err) {
         sendErrorResponse(res, 400, 'Failed to update user.', err);
@@ -283,7 +321,14 @@ exports.deactivateUser = async (req, res) => {
         user.registrationStatus = 'deactivated';
         await user.save();
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.USER_DEACTIVATED, `Deactivated user ${user.email}`, AUDIT_RESOURCE_TYPE_ENUM.User, oldState, user);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.USER_DEACTIVATED,
+            description: `Deactivated user ${user.email}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.User,
+            oldValue: oldState,
+            newValue: user
+        });
         res.status(200).json({ success: true, message: 'User deactivated successfully.', data: user });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to deactivate user.', err);
@@ -315,7 +360,14 @@ exports.activateUser = async (req, res) => {
         }
         await user.save();
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.USER_UPDATED, `Activated user ${user.email}`, AUDIT_RESOURCE_TYPE_ENUM.User, oldState, user);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.USER_UPDATED,
+            description: `Activated user ${user.email}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.User,
+            oldValue: oldState,
+            newValue: user
+        });
         res.status(200).json({ success: true, message: 'User activated successfully.', data: user });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to activate user.', err);
@@ -361,7 +413,14 @@ exports.manuallyApproveUser = async (req, res) => {
         });
 
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.USER_APPROVED, `Approved user ${user.email}`, AUDIT_RESOURCE_TYPE_ENUM.User, oldState, user);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.USER_APPROVED,
+            description: `Approved user ${user.email}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.User,
+            oldValue: oldState,
+            newValue: user
+        });
         res.status(200).json({ success: true, message: 'User approved and activated successfully.', data: user });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to approve user.', err);
@@ -406,7 +465,14 @@ exports.adminResetUserPassword = async (req, res) => {
             }
         });
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.PASSWORD_RESET, `Admin reset password for user ${user.email}`, AUDIT_RESOURCE_TYPE_ENUM.User, oldUser, user);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.PASSWORD_RESET,
+            description: `Admin reset password for user ${user.email}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.User,
+            oldValue: oldUser,
+            newValue: user
+        });
         res.status(200).json({ success: true, message: 'User password reset successfully.' });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to reset user password.', err);
@@ -442,7 +508,13 @@ exports.getAllProperties = async (req, res) => {
 
         const totalProperties = await Property.countDocuments(query);
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.READ, 'Viewed all properties', AUDIT_RESOURCE_TYPE_ENUM.Property, null, { query, count: properties.length });
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.READ,
+            description: 'Viewed all properties',
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Property,
+            newValue: { query, count: properties.length }
+        });
         res.status(200).json({ success: true, count: properties.length, total: totalProperties, page: parseInt(page), limit: parseInt(limit), data: properties });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to fetch properties.', err);
@@ -462,7 +534,13 @@ exports.getPropertyById = async (req, res) => {
         if (!property) {
             return sendErrorResponse(res, 404, 'Property not found.');
         }
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.READ, `Viewed property ${property.name}`, AUDIT_RESOURCE_TYPE_ENUM.Property, null, property);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.READ,
+            description: `Viewed property ${property.name}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Property,
+            newValue: property
+        });
         res.status(200).json({ success: true, data: property });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to fetch property details.', err);
@@ -489,7 +567,13 @@ exports.createProperty = async (req, res) => {
             mainContactUser: mainContactUser || req.user.id // Default to creator if not specified
         });
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.PROPERTY_CREATED, `Created property ${newProperty.name}`, AUDIT_RESOURCE_TYPE_ENUM.Property, null, newProperty);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.PROPERTY_CREATED,
+            description: `Created property ${newProperty.name}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Property,
+            newValue: newProperty
+        });
         res.status(201).json({ success: true, data: newProperty });
     } catch (err) {
         sendErrorResponse(res, 400, 'Failed to create property.', err);
@@ -517,7 +601,14 @@ exports.updateProperty = async (req, res) => {
 
         await property.save({ validateBeforeSave: true }); // Validate on save
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.PROPERTY_UPDATED, `Updated property ${property.name}`, AUDIT_RESOURCE_TYPE_ENUM.Property, oldProperty, property);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.PROPERTY_UPDATED,
+            description: `Updated property ${property.name}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Property,
+            oldValue: oldProperty,
+            newValue: property
+        });
         res.status(200).json({ success: true, data: property });
     } catch (err) {
         sendErrorResponse(res, 400, 'Failed to update property.', err);
@@ -543,7 +634,14 @@ exports.deactivateProperty = async (req, res) => {
         property.isActive = false;
         await property.save();
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.PROPERTY_DEACTIVATED, `Deactivated property ${property.name}`, AUDIT_RESOURCE_TYPE_ENUM.Property, oldState, property);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.PROPERTY_DEACTIVATED,
+            description: `Deactivated property ${property.name}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Property,
+            oldValue: oldState,
+            newValue: property
+        });
         res.status(200).json({ success: true, message: 'Property deactivated successfully.', data: property });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to deactivate property.', err);
@@ -576,7 +674,13 @@ exports.getAllUnits = async (req, res) => {
 
         const totalUnits = await Unit.countDocuments(query);
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.READ, `Viewed all units (filtered by property: ${propertyId})`, AUDIT_RESOURCE_TYPE_ENUM.Unit, null, { query, count: units.length });
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.READ,
+            description: `Viewed all units (filtered by property: ${propertyId})`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Unit,
+            newValue: { query, count: units.length }
+        });
         res.status(200).json({ success: true, count: units.length, total: totalUnits, page: parseInt(page), limit: parseInt(limit), data: units });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to fetch units.', err);
@@ -595,7 +699,13 @@ exports.getUnitById = async (req, res) => {
         if (!unit) {
             return sendErrorResponse(res, 404, 'Unit not found.');
         }
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.READ, `Viewed unit ${unit.unitName}`, AUDIT_RESOURCE_TYPE_ENUM.Unit, null, unit);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.READ,
+            description: `Viewed unit ${unit.unitName}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Unit,
+            newValue: unit
+        });
         res.status(200).json({ success: true, data: unit });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to fetch unit details.', err);
@@ -638,7 +748,13 @@ exports.createUnit = async (req, res) => {
         await propertyExists.save();
 
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.UNIT_CREATED, `Created unit ${newUnit.unitName} for property ${propertyExists.name}`, AUDIT_RESOURCE_TYPE_ENUM.Unit, null, newUnit);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.UNIT_CREATED,
+            description: `Created unit ${newUnit.unitName} for property ${propertyExists.name}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Unit,
+            newValue: newUnit
+        });
         res.status(201).json({ success: true, data: newUnit });
     } catch (err) {
         sendErrorResponse(res, 400, 'Failed to create unit.', err);
@@ -666,7 +782,14 @@ exports.updateUnit = async (req, res) => {
 
         await unit.save({ validateBeforeSave: true });
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.UNIT_UPDATED, `Updated unit ${unit.unitName}`, AUDIT_RESOURCE_TYPE_ENUM.Unit, oldUnit, unit);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.UNIT_UPDATED,
+            description: `Updated unit ${unit.unitName}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Unit,
+            oldValue: oldUnit,
+            newValue: unit
+        });
         res.status(200).json({ success: true, data: unit });
     } catch (err) {
         sendErrorResponse(res, 400, 'Failed to update unit.', err);
@@ -692,7 +815,14 @@ exports.deactivateUnit = async (req, res) => {
         unit.status = 'unavailable'; // Set appropriate deactivated status
         await unit.save();
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.UNIT_DEACTIVATED, `Deactivated unit ${unit.unitName}`, AUDIT_RESOURCE_TYPE_ENUM.Unit, oldState, unit);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.UNIT_DEACTIVATED,
+            description: `Deactivated unit ${unit.unitName}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Unit,
+            oldValue: oldState,
+            newValue: unit
+        });
         res.status(200).json({ success: true, message: 'Unit deactivated successfully.', data: unit });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to deactivate unit.', err);
@@ -735,7 +865,13 @@ exports.getAllRequests = async (req, res) => {
 
         const totalRequests = await Request.countDocuments(query);
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.READ, 'Viewed all requests', AUDIT_RESOURCE_TYPE_ENUM.Request, null, { query, count: requests.length });
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.READ,
+            description: 'Viewed all requests',
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Request,
+            newValue: { query, count: requests.length }
+        });
         res.status(200).json({ success: true, count: requests.length, total: totalRequests, page: parseInt(page), limit: parseInt(limit), data: requests });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to fetch requests.', err);
@@ -785,7 +921,13 @@ exports.getRequestAnalytics = async (req, res) => {
             averageResolutionTimeHours: avgResolutionTimeHours
         };
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.SYSTEM_EVENT, 'Accessed request analytics', AUDIT_RESOURCE_TYPE_ENUM.Request, null, analytics);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.SYSTEM_EVENT,
+            description: 'Accessed request analytics',
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Request,
+            newValue: analytics
+        });
         res.status(200).json({ success: true, data: analytics });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to fetch request analytics.', err);
@@ -816,7 +958,13 @@ exports.getRequestById = async (req, res) => {
         if (!request) {
             return sendErrorResponse(res, 404, 'Request not found.');
         }
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.READ, `Viewed request ${request._id}`, AUDIT_RESOURCE_TYPE_ENUM.Request, null, request);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.READ,
+            description: `Viewed request ${request._id}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Request,
+            newValue: request
+        });
         res.status(200).json({ success: true, data: request });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to fetch request details.', err);
@@ -869,7 +1017,14 @@ exports.updateRequestStatus = async (req, res) => {
             }
         });
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.REQUEST_STATUS_UPDATED, `Request ${request._id} status changed from ${oldStatus} to ${status}`, AUDIT_RESOURCE_TYPE_ENUM.Request, { status: oldStatus }, { status: request.status });
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.REQUEST_STATUS_UPDATED,
+            description: `Request ${request._id} status changed from ${oldStatus} to ${status}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Request,
+            oldValue: { status: oldStatus },
+            newValue: { status: request.status }
+        });
         res.status(200).json({ success: true, message: 'Request status updated.', data: request });
     } catch (err) {
         sendErrorResponse(res, 400, 'Failed to update request status.', err);
@@ -931,7 +1086,14 @@ exports.assignRequest = async (req, res) => {
         });
 
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.REQUEST_ASSIGNED, `Request ${request._id} assigned to ${assignedToModel}: ${assignedEntity.email || assignedEntity.name}`, AUDIT_RESOURCE_TYPE_ENUM.Request, { assignedTo: oldAssignedTo, assignedToModel: oldAssignedToModel }, { assignedTo: request.assignedTo, assignedToModel: request.assignedToModel });
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.REQUEST_ASSIGNED,
+            description: `Request ${request._id} assigned to ${assignedToModel}: ${assignedEntity.email || assignedEntity.name}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Request,
+            oldValue: { assignedTo: oldAssignedTo, assignedToModel: oldAssignedToModel },
+            newValue: { assignedTo: request.assignedTo, assignedToModel: request.assignedToModel }
+        });
         res.status(200).json({ success: true, message: 'Request assigned successfully.', data: request });
     } catch (err) {
         sendErrorResponse(res, 400, 'Failed to assign request.', err);
@@ -1012,7 +1174,13 @@ exports.addCommentToRequest = async (req, res) => {
             });
         }
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.COMMENT_ADDED, `Added comment to request ${request._id}`, AUDIT_RESOURCE_TYPE_ENUM.Comment, null, newComment);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.COMMENT_ADDED,
+            description: `Added comment to request ${request._id}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Comment,
+            newValue: newComment
+        });
         res.status(201).json({ success: true, data: newComment });
     } catch (err) {
         sendErrorResponse(res, 400, 'Failed to add comment to request.', err);
@@ -1049,7 +1217,13 @@ exports.getAllVendors = async (req, res) => {
 
         const totalVendors = await Vendor.countDocuments(query);
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.READ, 'Viewed all vendors', AUDIT_RESOURCE_TYPE_ENUM.Vendor, null, { query, count: vendors.length });
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.READ,
+            description: 'Viewed all vendors',
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Vendor,
+            newValue: { query, count: vendors.length }
+        });
         res.status(200).json({ success: true, count: vendors.length, total: totalVendors, page: parseInt(page), limit: parseInt(limit), data: vendors });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to fetch vendors.', err);
@@ -1068,7 +1242,13 @@ exports.getVendorById = async (req, res) => {
         if (!vendor) {
             return sendErrorResponse(res, 404, 'Vendor not found.');
         }
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.READ, `Viewed vendor ${vendor.name}`, AUDIT_RESOURCE_TYPE_ENUM.Vendor, null, vendor);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.READ,
+            description: `Viewed vendor ${vendor.name}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Vendor,
+            newValue: vendor
+        });
         res.status(200).json({ success: true, data: vendor });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to fetch vendor details.', err);
@@ -1091,7 +1271,13 @@ exports.createVendor = async (req, res) => {
             addedBy: req.user.id
         });
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.VENDOR_CREATED, `Created vendor ${newVendor.name}`, AUDIT_RESOURCE_TYPE_ENUM.Vendor, null, newVendor);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.VENDOR_CREATED,
+            description: `Created vendor ${newVendor.name}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Vendor,
+            newValue: newVendor
+        });
         res.status(201).json({ success: true, data: newVendor });
     } catch (err) {
         sendErrorResponse(res, 400, 'Failed to create vendor.', err);
@@ -1119,7 +1305,14 @@ exports.updateVendor = async (req, res) => {
 
         await vendor.save({ validateBeforeSave: true });
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.VENDOR_UPDATED, `Updated vendor ${vendor.name}`, AUDIT_RESOURCE_TYPE_ENUM.Vendor, oldVendor, vendor);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.VENDOR_UPDATED,
+            description: `Updated vendor ${vendor.name}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Vendor,
+            oldValue: oldVendor,
+            newValue: vendor
+        });
         res.status(200).json({ success: true, data: vendor });
     } catch (err) {
         sendErrorResponse(res, 400, 'Failed to update vendor.', err);
@@ -1145,7 +1338,14 @@ exports.deactivateVendor = async (req, res) => {
         vendor.status = 'inactive';
         await vendor.save();
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.VENDOR_DEACTIVATED, `Deactivated vendor ${vendor.name}`, AUDIT_RESOURCE_TYPE_ENUM.Vendor, oldState, vendor);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.VENDOR_DEACTIVATED,
+            description: `Deactivated vendor ${vendor.name}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Vendor,
+            oldValue: oldState,
+            newValue: vendor
+        });
         res.status(200).json({ success: true, message: 'Vendor deactivated successfully.', data: vendor });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to deactivate vendor.', err);
@@ -1180,7 +1380,13 @@ exports.getAllInvites = async (req, res) => {
 
         const totalInvites = await Invite.countDocuments(query);
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.READ, 'Viewed all invites', AUDIT_RESOURCE_TYPE_ENUM.Invite, null, { query, count: invites.length });
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.READ,
+            description: 'Viewed all invites',
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Invite,
+            newValue: { query, count: invites.length }
+        });
         res.status(200).json({ success: true, count: invites.length, total: totalInvites, page: parseInt(page), limit: parseInt(limit), data: invites });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to fetch invites.', err);
@@ -1202,7 +1408,13 @@ exports.getInviteById = async (req, res) => {
         if (!invite) {
             return sendErrorResponse(res, 404, 'Invite not found.');
         }
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.READ, `Viewed invite ${invite._id}`, AUDIT_RESOURCE_TYPE_ENUM.Invite, null, invite);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.READ,
+            description: `Viewed invite ${invite._id}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Invite,
+            newValue: invite
+        });
         res.status(200).json({ success: true, data: invite });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to fetch invite details.', err);
@@ -1277,7 +1489,13 @@ exports.createInvite = async (req, res) => {
             propertyDisplayName: propertyId ? (await Property.findById(propertyId).select('name')).name : 'the system'
         });
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.INVITE_SENT, `Sent invite to ${email} for role ${role}`, AUDIT_RESOURCE_TYPE_ENUM.Invite, null, newInvite);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.INVITE_SENT,
+            description: `Sent invite to ${email} for role ${role}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Invite,
+            newValue: newInvite
+        });
         res.status(201).json({ success: true, message: 'Invitation sent successfully.', data: newInvite });
 
     } catch (err) {
@@ -1317,7 +1535,13 @@ exports.resendInvite = async (req, res) => {
             propertyDisplayName: invite.property ? (await Property.findById(invite.property).select('name')).name : 'the system'
         });
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.INVITE_SENT, `Resent invite to ${invite.email} for role ${invite.role}`, AUDIT_RESOURCE_TYPE_ENUM.Invite, null, invite);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.INVITE_SENT,
+            description: `Resent invite to ${invite.email} for role ${invite.role}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Invite,
+            newValue: invite
+        });
         res.status(200).json({ success: true, message: 'Invitation resent successfully.', data: invite });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to resend invite.', err);
@@ -1345,7 +1569,14 @@ exports.revokeInvite = async (req, res) => {
         invite.revokedAt = new Date();
         await invite.save();
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.INVITE_REVOKED, `Revoked invite to ${invite.email}`, AUDIT_RESOURCE_TYPE_ENUM.Invite, oldState, invite);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.INVITE_REVOKED,
+            description: `Revoked invite to ${invite.email}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Invite,
+            oldValue: oldState,
+            newValue: invite
+        });
         res.status(200).json({ success: true, message: 'Invitation revoked successfully.', data: invite });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to revoke invite.', err);
@@ -1386,7 +1617,13 @@ exports.getAuditLogs = async (req, res) => {
 
         const totalLogs = await AuditLog.countDocuments(query);
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.READ, 'Viewed audit logs', AUDIT_RESOURCE_TYPE_ENUM.System, null, { query, count: auditLogs.length });
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.READ,
+            description: 'Viewed audit logs',
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.System,
+            newValue: { query, count: auditLogs.length }
+        });
         res.status(200).json({ success: true, count: auditLogs.length, total: totalLogs, page: parseInt(page), limit: parseInt(limit), data: auditLogs });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to fetch audit logs.', err);
@@ -1485,7 +1722,13 @@ exports.getSystemHealthSummary = async (req, res) => {
         }
 
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.SYSTEM_EVENT, 'Accessed system health summary', AUDIT_RESOURCE_TYPE_ENUM.System, null, health);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.SYSTEM_EVENT,
+            description: 'Accessed system health summary',
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.System,
+            newValue: health
+        });
         res.status(200).json({ success: true, data: health });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to fetch system health summary.', err);
@@ -1527,7 +1770,13 @@ exports.sendSystemBroadcastNotification = async (req, res) => {
 
         await Promise.allSettled(notificationPromises); // Use allSettled to ensure all promises resolve/reject
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.BROADCAST_NOTIFICATION_SENT, `Sent system broadcast: ${message.substring(0, 100)}`, AUDIT_RESOURCE_TYPE_ENUM.System, null, { message, link, type, sentToCount: allActiveUsers.length });
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.BROADCAST_NOTIFICATION_SENT,
+            description: `Sent system broadcast: ${message.substring(0, 100)}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.System,
+            newValue: { message, link, type, sentToCount: allActiveUsers.length }
+        });
         res.status(200).json({ success: true, message: 'Broadcast notification initiated successfully. Check logs for individual send statuses.' });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to send broadcast notification.', err);
@@ -1568,7 +1817,13 @@ exports.getAllMedia = async (req, res) => {
 
         const totalMedia = await Media.countDocuments(query);
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.READ, 'Viewed all media files', AUDIT_RESOURCE_TYPE_ENUM.Media, null, { query, count: mediaFiles.length });
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.READ,
+            description: 'Viewed all media files',
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Media,
+            newValue: { query, count: mediaFiles.length }
+        });
         res.status(200).json({ success: true, count: mediaFiles.length, total: totalMedia, page: parseInt(page), limit: parseInt(limit), data: mediaFiles });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to fetch media files.', err);
@@ -1611,7 +1866,13 @@ exports.getMediaStorageStats = async (req, res) => {
             stats.notes = "No media files found or 'size' field missing for calculation.";
         }
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.SYSTEM_EVENT, 'Accessed media storage stats', AUDIT_RESOURCE_TYPE_ENUM.Media, null, stats);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.SYSTEM_EVENT,
+            description: 'Accessed media storage stats',
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Media,
+            newValue: stats
+        });
         res.json({ success: true, data: stats });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to fetch media storage stats.', err);
@@ -1643,7 +1904,13 @@ exports.deleteMedia = async (req, res) => {
         // Delete from MongoDB
         await mediaDoc.deleteOne();
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.DELETE, `Deleted media file: ${mediaDoc.filename}`, AUDIT_RESOURCE_TYPE_ENUM.Media, mediaDoc);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.DELETE,
+            description: `Deleted media file: ${mediaDoc.filename}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Media,
+            oldValue: mediaDoc
+        });
         res.status(200).json({ success: true, message: 'Media file deleted successfully.' });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to delete media file.', err);
@@ -1683,7 +1950,13 @@ exports.getAllLeases = async (req, res) => {
 
         const totalLeases = await Lease.countDocuments(query);
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.READ, 'Viewed all leases', AUDIT_RESOURCE_TYPE_ENUM.Lease, null, { query, count: leases.length });
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.READ,
+            description: 'Viewed all leases',
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Lease,
+            newValue: { query, count: leases.length }
+        });
         res.status(200).json({ success: true, count: leases.length, total: totalLeases, page: parseInt(page), limit: parseInt(limit), data: leases });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to fetch leases.', err);
@@ -1707,7 +1980,13 @@ exports.getLeaseById = async (req, res) => {
         if (!lease) {
             return sendErrorResponse(res, 404, 'Lease not found.');
         }
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.READ, `Viewed lease ${lease._id}`, AUDIT_RESOURCE_TYPE_ENUM.Lease, null, lease);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.READ,
+            description: `Viewed lease ${lease._id}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Lease,
+            newValue: lease
+        });
         res.status(200).json({ success: true, data: lease });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to fetch lease details.', err);
@@ -1740,7 +2019,14 @@ exports.createLease = async (req, res) => {
         if (unitExists.status !== 'occupied' && unitExists.status !== 'leased') {
             unitExists.status = 'occupied';
             await unitExists.save();
-            createAuditLog(req.user.id, AUDIT_ACTION_ENUM.UNIT_UPDATED, `Unit ${unitExists.unitName} status updated to occupied due to new lease`, AUDIT_RESOURCE_TYPE_ENUM.Unit, { status: unitExists.status }, { status: 'occupied' });
+            await createAuditLog({
+                user: req.user.id,
+                action: AUDIT_ACTION_ENUM.UNIT_UPDATED,
+                description: `Unit ${unitExists.unitName} status updated to occupied due to new lease`,
+                resourceType: AUDIT_RESOURCE_TYPE_ENUM.Unit,
+                oldValue: { status: unitExists.status },
+                newValue: { status: 'occupied' }
+            });
         }
 
         // Create PropertyUser association if it doesn't exist or update roles
@@ -1749,7 +2035,13 @@ exports.createLease = async (req, res) => {
             if (!propertyUser.roles.includes('tenant')) {
                 propertyUser.roles.push('tenant');
                 await propertyUser.save();
-                createAuditLog(req.user.id, AUDIT_ACTION_ENUM.PROPERTY_USER_ASSOCIATION_UPDATED, `Added tenant role to existing PropertyUser for ${tenantExists.email} on ${propertyExists.name}/${unitExists.unitName}`, AUDIT_RESOURCE_TYPE_ENUM.PropertyUser, null, propertyUser);
+                await createAuditLog({
+                    user: req.user.id,
+                    action: AUDIT_ACTION_ENUM.PROPERTY_USER_ASSOCIATION_UPDATED,
+                    description: `Added tenant role to existing PropertyUser for ${tenantExists.email} on ${propertyExists.name}/${unitExists.unitName}`,
+                    resourceType: AUDIT_RESOURCE_TYPE_ENUM.PropertyUser,
+                    newValue: propertyUser
+                });
             }
         } else {
             propertyUser = await PropertyUser.create({
@@ -1759,10 +2051,22 @@ exports.createLease = async (req, res) => {
                 roles: ['tenant'],
                 invitedBy: req.user.id // Admin creates the association
             });
-            createAuditLog(req.user.id, AUDIT_ACTION_ENUM.PROPERTY_USER_ASSOCIATION_CREATED, `Created new PropertyUser association for tenant ${tenantExists.email} on ${propertyExists.name}/${unitExists.unitName}`, AUDIT_RESOURCE_TYPE_ENUM.PropertyUser, null, propertyUser);
+            await createAuditLog({
+                user: req.user.id,
+                action: AUDIT_ACTION_ENUM.PROPERTY_USER_ASSOCIATION_CREATED,
+                description: `Created new PropertyUser association for tenant ${tenantExists.email} on ${propertyExists.name}/${unitExists.unitName}`,
+                resourceType: AUDIT_RESOURCE_TYPE_ENUM.PropertyUser,
+                newValue: propertyUser
+            });
         }
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.LEASE_CREATED, `Created new lease for tenant ${tenantExists.email} on property ${propertyExists.name}`, AUDIT_RESOURCE_TYPE_ENUM.Lease, null, newLease);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.LEASE_CREATED,
+            description: `Created new lease for tenant ${tenantExists.email} on property ${propertyExists.name}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Lease,
+            newValue: newLease
+        });
         res.status(201).json({ success: true, data: newLease });
     } catch (err) {
         sendErrorResponse(res, 400, 'Failed to create lease.', err);
@@ -1790,7 +2094,14 @@ exports.updateLease = async (req, res) => {
 
         await lease.save({ validateBeforeSave: true });
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.LEASE_UPDATED, `Updated lease ${lease._id}`, AUDIT_RESOURCE_TYPE_ENUM.Lease, oldLease, lease);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.LEASE_UPDATED,
+            description: `Updated lease ${lease._id}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Lease,
+            oldValue: oldLease,
+            newValue: lease
+        });
         res.status(200).json({ success: true, data: lease });
     } catch (err) {
         sendErrorResponse(res, 400, 'Failed to update lease.', err);
@@ -1823,7 +2134,14 @@ exports.terminateLease = async (req, res) => {
         if (unit && unit.status !== 'vacant') {
             unit.status = 'vacant';
             await unit.save();
-            createAuditLog(req.user.id, AUDIT_ACTION_ENUM.UNIT_UPDATED, `Unit ${unit.unitName} status updated to vacant due to lease termination`, AUDIT_RESOURCE_TYPE_ENUM.Unit, { status: oldState.status }, { status: 'vacant' });
+            await createAuditLog({
+                user: req.user.id,
+                action: AUDIT_ACTION_ENUM.UNIT_UPDATED,
+                description: `Unit ${unit.unitName} status updated to vacant due to lease termination`,
+                resourceType: AUDIT_RESOURCE_TYPE_ENUM.Unit,
+                oldValue: { status: oldState.status },
+                newValue: { status: 'vacant' }
+            });
         }
 
         // Remove tenant association from PropertyUser if this was their only property/unit association
@@ -1834,10 +2152,22 @@ exports.terminateLease = async (req, res) => {
                 if (propertyUser.roles.length === 0) { // If no other roles, deactivate association
                     propertyUser.isActive = false;
                     await propertyUser.save();
-                    createAuditLog(req.user.id, AUDIT_ACTION_ENUM.PROPERTY_USER_ASSOCIATION_DEACTIVATED, `Deactivated PropertyUser association for ${lease.tenant.email} on property ${lease.property.name} (no remaining roles)`, AUDIT_RESOURCE_TYPE_ENUM.PropertyUser, null, propertyUser);
+                    await createAuditLog({
+                        user: req.user.id,
+                        action: AUDIT_ACTION_ENUM.PROPERTY_USER_ASSOCIATION_DEACTIVATED,
+                        description: `Deactivated PropertyUser association for ${lease.tenant.email} on property ${lease.property.name} (no remaining roles)`,
+                        resourceType: AUDIT_RESOURCE_TYPE_ENUM.PropertyUser,
+                        newValue: propertyUser
+                    });
                 } else {
                     await propertyUser.save();
-                    createAuditLog(req.user.id, AUDIT_ACTION_ENUM.PROPERTY_USER_ASSOCIATION_UPDATED, `Removed tenant role from PropertyUser for ${lease.tenant.email} on property ${lease.property.name}`, AUDIT_RESOURCE_TYPE_ENUM.PropertyUser, null, propertyUser);
+                    await createAuditLog({
+                        user: req.user.id,
+                        action: AUDIT_ACTION_ENUM.PROPERTY_USER_ASSOCIATION_UPDATED,
+                        description: `Removed tenant role from PropertyUser for ${lease.tenant.email} on property ${lease.property.name}`,
+                        resourceType: AUDIT_RESOURCE_TYPE_ENUM.PropertyUser,
+                        newValue: propertyUser
+                    });
                 }
             }
         }
@@ -1858,7 +2188,14 @@ exports.terminateLease = async (req, res) => {
         });
 
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.LEASE_UPDATED, `Terminated lease ${lease._id}`, AUDIT_RESOURCE_TYPE_ENUM.Lease, oldState, lease);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.LEASE_UPDATED,
+            description: `Terminated lease ${lease._id}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Lease,
+            oldValue: oldState,
+            newValue: lease
+        });
         res.status(200).json({ success: true, message: 'Lease terminated successfully.', data: lease });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to terminate lease.', err);
@@ -1895,7 +2232,13 @@ exports.getAllRents = async (req, res) => {
 
         const totalRents = await Rent.countDocuments(query);
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.READ, 'Viewed all rent records', AUDIT_RESOURCE_TYPE_ENUM.Rent, null, { query, count: rents.length });
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.READ,
+            description: 'Viewed all rent records',
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Rent,
+            newValue: { query, count: rents.length }
+        });
         res.status(200).json({ success: true, count: rents.length, total: totalRents, page: parseInt(page), limit: parseInt(limit), data: rents });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to fetch rent records.', err);
@@ -1919,7 +2262,13 @@ exports.getRentById = async (req, res) => {
         if (!rent) {
             return sendErrorResponse(res, 404, 'Rent record not found.');
         }
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.READ, `Viewed rent record ${rent._id}`, AUDIT_RESOURCE_TYPE_ENUM.Rent, null, rent);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.READ,
+            description: `Viewed rent record ${rent._id}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Rent,
+            newValue: rent
+        });
         res.status(200).json({ success: true, data: rent });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to fetch rent record details.', err);
@@ -1951,7 +2300,13 @@ exports.recordRentPayment = async (req, res) => {
         // Update lease's last payment date or status if needed (complex, typically in a dedicated cron/service)
         // For simplicity, we just record the rent payment.
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.BILL_PAID, `Recorded rent payment for lease ${lease}`, AUDIT_RESOURCE_TYPE_ENUM.Rent, null, newRent);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.BILL_PAID,
+            description: `Recorded rent payment for lease ${lease}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Rent,
+            newValue: newRent
+        });
         res.status(201).json({ success: true, data: newRent });
     } catch (err) {
         sendErrorResponse(res, 400, 'Failed to record rent payment.', err);
@@ -1998,7 +2353,14 @@ exports.updateRentPayment = async (req, res) => {
 
         await rent.save({ validateBeforeSave: true });
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.BILL_UPDATED, `Updated rent payment ${rent._id}`, AUDIT_RESOURCE_TYPE_ENUM.Rent, oldRent, rent);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.BILL_UPDATED,
+            description: `Updated rent payment ${rent._id}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Rent,
+            oldValue: oldRent,
+            newValue: rent
+        });
         res.status(200).json({ success: true, data: rent });
     } catch (err) {
         sendErrorResponse(res, 400, 'Failed to update rent payment.', err);
@@ -2040,7 +2402,13 @@ exports.getAllScheduledMaintenances = async (req, res) => {
 
         const totalScheduledMaintenances = await ScheduledMaintenance.countDocuments(query);
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.READ, 'Viewed all scheduled maintenances', AUDIT_RESOURCE_TYPE_ENUM.ScheduledMaintenance, null, { query, count: scheduledMaintenances.length });
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.READ,
+            description: 'Viewed all scheduled maintenances',
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.ScheduledMaintenance,
+            newValue: { query, count: scheduledMaintenances.length }
+        });
         res.status(200).json({ success: true, count: scheduledMaintenances.length, total: totalScheduledMaintenances, page: parseInt(page), limit: parseInt(limit), data: scheduledMaintenances });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to fetch scheduled maintenances.', err);
@@ -2063,7 +2431,13 @@ exports.getScheduledMaintenanceById = async (req, res) => {
         if (!scheduledMaintenance) {
             return sendErrorResponse(res, 404, 'Scheduled maintenance not found.');
         }
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.READ, `Viewed scheduled maintenance ${scheduledMaintenance._id}`, AUDIT_RESOURCE_TYPE_ENUM.ScheduledMaintenance, null, scheduledMaintenance);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.READ,
+            description: `Viewed scheduled maintenance ${scheduledMaintenance._id}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.ScheduledMaintenance,
+            newValue: scheduledMaintenance
+        });
         res.status(200).json({ success: true, data: scheduledMaintenance });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to fetch scheduled maintenance details.', err);
@@ -2097,7 +2471,13 @@ exports.createScheduledMaintenance = async (req, res) => {
         // Potentially generate first request if scheduledDate is in past or very near
         // This logic is usually in a separate job/cron for recurring tasks
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.SCHEDULED_MAINTENANCE_CREATED, `Created scheduled maintenance: ${newScheduledMaintenance.title}`, AUDIT_RESOURCE_TYPE_ENUM.ScheduledMaintenance, null, newScheduledMaintenance);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.SCHEDULED_MAINTENANCE_CREATED,
+            description: `Created scheduled maintenance: ${newScheduledMaintenance.title}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.ScheduledMaintenance,
+            newValue: newScheduledMaintenance
+        });
         res.status(201).json({ success: true, data: newScheduledMaintenance });
     } catch (err) {
         sendErrorResponse(res, 400, 'Failed to create scheduled maintenance.', err);
@@ -2125,7 +2505,14 @@ exports.updateScheduledMaintenance = async (req, res) => {
 
         await scheduledMaintenance.save({ validateBeforeSave: true });
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.SCHEDULED_MAINTENANCE_UPDATED, `Updated scheduled maintenance ${scheduledMaintenance.title}`, AUDIT_RESOURCE_TYPE_ENUM.ScheduledMaintenance, oldScheduledMaintenance, scheduledMaintenance);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.SCHEDULED_MAINTENANCE_UPDATED,
+            description: `Updated scheduled maintenance ${scheduledMaintenance.title}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.ScheduledMaintenance,
+            oldValue: oldScheduledMaintenance,
+            newValue: scheduledMaintenance
+        });
         res.status(200).json({ success: true, data: scheduledMaintenance });
     } catch (err) {
         sendErrorResponse(res, 400, 'Failed to update scheduled maintenance.', err);
@@ -2151,7 +2538,14 @@ exports.pauseScheduledMaintenance = async (req, res) => {
         sm.status = 'paused';
         await sm.save();
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.SCHEDULED_MAINTENANCE_PAUSED, `Paused scheduled maintenance: ${sm.title}`, AUDIT_RESOURCE_TYPE_ENUM.ScheduledMaintenance, oldState, sm);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.SCHEDULED_MAINTENANCE_PAUSED,
+            description: `Paused scheduled maintenance: ${sm.title}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.ScheduledMaintenance,
+            oldValue: oldState,
+            newValue: sm
+        });
         res.status(200).json({ success: true, message: 'Scheduled maintenance paused.', data: sm });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to pause scheduled maintenance.', err);
@@ -2177,7 +2571,14 @@ exports.resumeScheduledMaintenance = async (req, res) => {
         sm.status = 'active';
         await sm.save();
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.SCHEDULED_MAINTENANCE_RESUMED, `Resumed scheduled maintenance: ${sm.title}`, AUDIT_RESOURCE_TYPE_ENUM.ScheduledMaintenance, oldState, sm);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.SCHEDULED_MAINTENANCE_RESUMED,
+            description: `Resumed scheduled maintenance: ${sm.title}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.ScheduledMaintenance,
+            oldValue: oldState,
+            newValue: sm
+        });
         res.status(200).json({ success: true, message: 'Scheduled maintenance resumed.', data: sm });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to resume scheduled maintenance.', err);
@@ -2236,7 +2637,13 @@ exports.getAllPropertyUsers = async (req, res) => {
 
         const totalPropertyUsers = await PropertyUser.countDocuments(query);
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.READ, 'Viewed all property user associations', AUDIT_RESOURCE_TYPE_ENUM.PropertyUser, null, { query, count: propertyUsers.length });
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.READ,
+            description: 'Viewed all property user associations',
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.PropertyUser,
+            newValue: { query, count: propertyUsers.length }
+        });
         res.status(200).json({ success: true, count: propertyUsers.length, total: totalPropertyUsers, page: parseInt(page), limit: parseInt(limit), data: propertyUsers });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to fetch property user associations.', err);
@@ -2258,7 +2665,13 @@ exports.getPropertyUserById = async (req, res) => {
         if (!propertyUser) {
             return sendErrorResponse(res, 404, 'Property user association not found.');
         }
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.READ, `Viewed property user association ${propertyUser._id}`, AUDIT_RESOURCE_TYPE_ENUM.PropertyUser, null, propertyUser);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.READ,
+            description: `Viewed property user association ${propertyUser._id}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.PropertyUser,
+            newValue: propertyUser
+        });
         res.status(200).json({ success: true, data: propertyUser });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to fetch property user association details.', err);
@@ -2301,7 +2714,13 @@ exports.createPropertyUser = async (req, res) => {
             existingAssociation.roles = mergedRoles;
             existingAssociation.isActive = true; // Reactivate if it was deactivated
             await existingAssociation.save();
-            createAuditLog(req.user.id, AUDIT_ACTION_ENUM.PROPERTY_USER_ASSOCIATION_UPDATED, `Updated existing property user association for ${user.email} on ${property.name}`, AUDIT_RESOURCE_TYPE_ENUM.PropertyUser, null, existingAssociation);
+            await createAuditLog({
+                user: req.user.id,
+                action: AUDIT_ACTION_ENUM.PROPERTY_USER_ASSOCIATION_UPDATED,
+                description: `Updated existing property user association for ${user.email} on ${property.name}`,
+                resourceType: AUDIT_RESOURCE_TYPE_ENUM.PropertyUser,
+                newValue: existingAssociation
+            });
             return res.status(200).json({ success: true, message: 'Property user association updated.', data: existingAssociation });
         }
 
@@ -2314,7 +2733,13 @@ exports.createPropertyUser = async (req, res) => {
             isActive: true
         });
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.PROPERTY_USER_ASSOCIATION_CREATED, `Created new property user association for ${user.email} on ${property.name}`, AUDIT_RESOURCE_TYPE_ENUM.PropertyUser, null, newAssociation);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.PROPERTY_USER_ASSOCIATION_CREATED,
+            description: `Created new property user association for ${user.email} on ${property.name}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.PropertyUser,
+            newValue: newAssociation
+        });
         res.status(201).json({ success: true, data: newAssociation });
     } catch (err) {
         sendErrorResponse(res, 400, 'Failed to create property user association.', err);
@@ -2356,7 +2781,14 @@ exports.updatePropertyUser = async (req, res) => {
 
         await propertyUser.save({ validateBeforeSave: true });
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.PROPERTY_USER_ASSOCIATION_UPDATED, `Updated property user association ${propertyUser._id}`, AUDIT_RESOURCE_TYPE_ENUM.PropertyUser, oldPropertyUser, propertyUser);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.PROPERTY_USER_ASSOCIATION_UPDATED,
+            description: `Updated property user association ${propertyUser._id}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.PropertyUser,
+            oldValue: oldPropertyUser,
+            newValue: propertyUser
+        });
         res.status(200).json({ success: true, data: propertyUser });
     } catch (err) {
         sendErrorResponse(res, 400, 'Failed to update property user association.', err);
@@ -2382,7 +2814,14 @@ exports.deactivatePropertyUser = async (req, res) => {
         propertyUser.isActive = false;
         await propertyUser.save();
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.PROPERTY_USER_ASSOCIATION_DEACTIVATED, `Deactivated property user association ${propertyUser._id}`, AUDIT_RESOURCE_TYPE_ENUM.PropertyUser, oldState, propertyUser);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.PROPERTY_USER_ASSOCIATION_DEACTIVATED,
+            description: `Deactivated property user association ${propertyUser._id}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.PropertyUser,
+            oldValue: oldState,
+            newValue: propertyUser
+        });
         res.status(200).json({ success: true, message: 'Property user association deactivated successfully.', data: propertyUser });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to deactivate property user association.', err);
@@ -2422,7 +2861,13 @@ exports.getAllComments = async (req, res) => {
 
         const totalComments = await Comment.countDocuments(query);
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.READ, 'Viewed all comments', AUDIT_RESOURCE_TYPE_ENUM.Comment, null, { query, count: comments.length });
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.READ,
+            description: 'Viewed all comments',
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Comment,
+            newValue: { query, count: comments.length }
+        });
         res.status(200).json({ success: true, count: comments.length, total: totalComments, page: parseInt(page), limit: parseInt(limit), data: comments });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to fetch comments.', err);
@@ -2466,7 +2911,13 @@ exports.deleteComment = async (req, res) => {
 
         await comment.deleteOne();
 
-        createAuditLog(req.user.id, AUDIT_ACTION_ENUM.DELETE, `Deleted comment ${comment._id}`, AUDIT_RESOURCE_TYPE_ENUM.Comment, comment);
+        await createAuditLog({
+            user: req.user.id,
+            action: AUDIT_ACTION_ENUM.DELETE,
+            description: `Deleted comment ${comment._id}`,
+            resourceType: AUDIT_RESOURCE_TYPE_ENUM.Comment,
+            oldValue: comment
+        });
         res.status(200).json({ success: true, message: 'Comment deleted successfully.' });
     } catch (err) {
         sendErrorResponse(res, 500, 'Failed to delete comment.', err);

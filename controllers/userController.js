@@ -722,7 +722,7 @@ const updateUserRole = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
-    getUserProfile,
+    getUserProfile, // Make sure this is exported
     updateUserProfile,
     getAllUsers,
     getUserById,

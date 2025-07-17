@@ -50,24 +50,20 @@ const createVendor = async (vendorData, createdByUserId, ipAddress) => {
     throw new AppError('Name, phone, email, and at least one service are required.', 400);
   }
 
-  // Check if vendor with this email already exists
   const existingVendor = await Vendor.findOne({ email: email.toLowerCase() });
   if (existingVendor) throw new AppError(`A vendor with email ${email} already exists.`, 400);
 
-  // Validate services
   const normalizedServices = services.map(s => s.toLowerCase());
   const invalidServices = normalizedServices.filter(s => !SERVICE_ENUM_SET.has(s));
   if (invalidServices.length > 0) {
     throw new AppError(`Invalid service(s): ${invalidServices.join(', ')}. Allowed: ${SERVICE_ENUM.join(', ')}`, 400);
   }
 
-  // Validate status
   let normalizedStatus = status ? status.toLowerCase() : 'active';
   if (!STATUS_ENUM_SET.has(normalizedStatus)) {
     throw new AppError(`Invalid status: ${status}. Allowed: ${STATUS_ENUM.join(', ')}`, 400);
   }
 
-  // Validate associatedProperties permissions
   if (associatedProperties && associatedProperties.length > 0) {
     const creator = await User.findById(createdByUserId);
     if (!creator) throw new AppError('Creator user not found.', 404);
@@ -80,23 +76,11 @@ const createVendor = async (vendorData, createdByUserId, ipAddress) => {
   }
 
   const newVendor = new Vendor({
-    name,
-    phone,
-    email: email.toLowerCase(),
-    address,
-    contactPerson,
-    services: normalizedServices,
-    status: normalizedStatus,
-    notes,
-    associatedProperties,
-    addedBy: createdByUserId,
-    description,
-    fixedCalloutFee,
-    paymentTerms,
-    companyName,
-    licenseNumber,
-    insuranceDetails,
-    documents
+    name, phone, email: email.toLowerCase(), address, contactPerson,
+    services: normalizedServices, status: normalizedStatus, notes,
+    associatedProperties, addedBy: createdByUserId, description,
+    fixedCalloutFee, paymentTerms, companyName, licenseNumber,
+    insuranceDetails, documents
   });
 
   let createdVendor;
@@ -110,9 +94,9 @@ const createVendor = async (vendorData, createdByUserId, ipAddress) => {
   }
 
   await createAuditLog({
-    action: AUDIT_ACTION_ENUM.find(a => a === 'VENDOR_CREATED') || 'CREATE',
+    action: AUDIT_ACTION_ENUM.VENDOR_CREATED,
     user: createdByUserId,
-    resourceType: AUDIT_RESOURCE_TYPE_ENUM.find(r => r === 'Vendor') || 'Vendor',
+    resourceType: 'Vendor',
     resourceId: createdVendor._id,
     newValue: createdVendor.toObject(),
     ipAddress,
@@ -131,44 +115,24 @@ const getVendorsForUser = async (user, filters = {}, page = 1, limit = 10, ipAdd
   const query = {};
   const skip = (parseInt(page) - 1) * parseInt(limit);
 
-  // Role-based access control
   if (user.role === 'admin') {
     // Full access
   } else if (['landlord', 'propertymanager'].includes(user.role)) {
-    // Only vendors they added or associated with properties they manage
     const managedPropertyIds = await PropertyUser.find({
       user: user._id,
       isActive: true,
-      roles: { $in: [
-        PROPERTY_USER_ROLES_ENUM[0], // landlord
-        PROPERTY_USER_ROLES_ENUM[1], // propertymanager
-        PROPERTY_USER_ROLES_ENUM[4], // admin_access
-      ]}
+      roles: { $in: [PROPERTY_USER_ROLES_ENUM[0], PROPERTY_USER_ROLES_ENUM[1], PROPERTY_USER_ROLES_ENUM[4]] }
     }).distinct('property');
-
-    // Vendors associated with those properties
-    query.$or = [
-      { addedBy: user._id },
-      { associatedProperties: { $in: managedPropertyIds } }
-    ];
+    query.$or = [{ addedBy: user._id }, { associatedProperties: { $in: managedPropertyIds } }];
   } else {
     throw new AppError('Access denied: You do not have permission to view vendors.', 403);
   }
 
-  // Filters
   if (filters.status) {
-    const statusFilter = filters.status.toLowerCase();
-    if (!STATUS_ENUM_SET.has(statusFilter)) {
-      throw new AppError(`Invalid vendor status filter: ${filters.status}`, 400);
-    }
-    query.status = statusFilter;
+    query.status = filters.status.toLowerCase();
   }
   if (filters.service) {
-    const serviceFilter = filters.service.toLowerCase();
-    if (!SERVICE_ENUM_SET.has(serviceFilter)) {
-      throw new AppError(`Invalid service filter: ${filters.service}`, 400);
-    }
-    query.services = serviceFilter;
+    query.services = filters.service.toLowerCase();
   }
   if (filters.propertyId) {
     if (user.role !== 'admin' && !(await checkPropertyManagementPermission(user, filters.propertyId))) {
@@ -177,14 +141,11 @@ const getVendorsForUser = async (user, filters = {}, page = 1, limit = 10, ipAdd
     query.associatedProperties = filters.propertyId;
   }
   if (filters.search) {
-    query.$or = [
+    query.$or = (query.$or || []).concat([
       { name: { $regex: filters.search, $options: 'i' } },
       { email: { $regex: filters.search, $options: 'i' } },
       { phone: { $regex: filters.search, $options: 'i' } },
-      { contactPerson: { $regex: filters.search, $options: 'i' } },
-      { companyName: { $regex: filters.search, $options: 'i' } },
-      { description: { $regex: filters.search, $options: 'i' } }
-    ];
+    ]);
   }
 
   const vendors = await Vendor.find(query)
@@ -194,11 +155,11 @@ const getVendorsForUser = async (user, filters = {}, page = 1, limit = 10, ipAdd
     .skip(skip);
 
   const totalVendors = await Vendor.countDocuments(query);
-
+  
   await createAuditLog({
-    action: AUDIT_ACTION_ENUM.find(a => a === 'READ_ALL') || 'READ_ALL',
+    action: AUDIT_ACTION_ENUM.FETCH_ALL_VENDORS, // Correctly use the specific enum
     user: user._id,
-    resourceType: AUDIT_RESOURCE_TYPE_ENUM.find(r => r === 'Vendor') || 'Vendor',
+    resourceType: 'Vendor',
     ipAddress,
     description: `User ${user.email} fetched list of vendors.`,
     status: 'success',
@@ -217,33 +178,29 @@ const getVendorsForUser = async (user, filters = {}, page = 1, limit = 10, ipAdd
  * Fetches a single vendor by ID, with authorization check.
  */
 const getVendorById = async (vendorId, user) => {
-  const vendor = await Vendor.findById(vendorId).populate('addedBy', 'firstName lastName email');
-  if (!vendor) throw new AppError('Vendor not found.', 404);
+    const vendor = await Vendor.findById(vendorId).populate('addedBy', 'firstName lastName email');
+    if (!vendor) throw new AppError('Vendor not found.', 404);
 
-  if (user.role === 'admin') {
-    return vendor;
-  } else if (['landlord', 'propertymanager'].includes(user.role)) {
-    const managedPropertyIds = await PropertyUser.find({
-      user: user._id,
-      isActive: true,
-      roles: { $in: [
-        PROPERTY_USER_ROLES_ENUM[0],
-        PROPERTY_USER_ROLES_ENUM[1],
-        PROPERTY_USER_ROLES_ENUM[4],
-      ]}
-    }).distinct('property');
-    const isAddedByMe = vendor.addedBy && vendor.addedBy._id.toString() === user._id.toString();
-    const isAssociated = vendor.associatedProperties && vendor.associatedProperties.some(pid =>
-      managedPropertyIds.map(id => id.toString()).includes(pid.toString())
-    );
-    if (isAddedByMe || isAssociated) {
-      return vendor;
+    if (user.role === 'admin') {
+        return vendor;
+    } else if (['landlord', 'propertymanager'].includes(user.role)) {
+        const managedPropertyIds = await PropertyUser.find({
+            user: user._id,
+            isActive: true,
+            roles: { $in: [ PROPERTY_USER_ROLES_ENUM[0], PROPERTY_USER_ROLES_ENUM[1], PROPERTY_USER_ROLES_ENUM[4] ]}
+        }).distinct('property');
+        const isAddedByMe = vendor.addedBy && vendor.addedBy._id.toString() === user._id.toString();
+        const isAssociated = vendor.associatedProperties && vendor.associatedProperties.some(pid =>
+            managedPropertyIds.map(id => id.toString()).includes(pid.toString())
+        );
+        if (isAddedByMe || isAssociated) {
+            return vendor;
+        } else {
+            throw new AppError('Access denied: You are not authorized to view this vendor.', 403);
+        }
     } else {
-      throw new AppError('Access denied: You are not authorized to view this vendor.', 403);
+        throw new AppError('Access denied: You do not have permission to view vendors.', 403);
     }
-  } else {
-    throw new AppError('Access denied: You do not have permission to view vendors.', 403);
-  }
 };
 
 /**
@@ -256,78 +213,31 @@ const updateVendor = async (vendorId, updateData, updatedByUserId, ipAddress) =>
   const updater = await User.findById(updatedByUserId);
   if (!updater) throw new AppError('Updater user not found.', 404);
 
-  // Authorization
-  if (updater.role === 'admin') {
-    // Admin has full access
-  } else if (['landlord', 'propertymanager'].includes(updater.role)) {
-    const managedPropertyIds = await PropertyUser.find({
-      user: updater._id,
-      isActive: true,
-      roles: { $in: [
-        PROPERTY_USER_ROLES_ENUM[0],
-        PROPERTY_USER_ROLES_ENUM[1],
-        PROPERTY_USER_ROLES_ENUM[4],
-      ]}
-    }).distinct('property');
-    const isAddedByMe = vendor.addedBy && vendor.addedBy.toString() === updatedByUserId;
-    const isAssociated = vendor.associatedProperties && vendor.associatedProperties.some(pid =>
-      managedPropertyIds.map(id => id.toString()).includes(pid.toString())
-    );
-    if (!isAddedByMe && !isAssociated) {
-      throw new AppError('Access denied: You are not authorized to update this vendor.', 403);
-    }
-    // Prevent PM/Landlord from deactivating
-    if (updateData.status && updateData.status.toLowerCase() === 'inactive' && updater.role !== 'admin') {
-      throw new AppError('Only administrators can deactivate vendors.', 403);
-    }
-    // Prevent PM/Landlord from changing email
-    if (updateData.email && updateData.email !== vendor.email) {
-      throw new AppError('Landlords/Property Managers cannot change vendor email addresses.', 403);
-    }
-  } else {
-    throw new AppError('Access denied: You do not have permission to update vendors.', 403);
+  if (updater.role !== 'admin') {
+      const isAddedByMe = vendor.addedBy && vendor.addedBy.toString() === updatedByUserId;
+      if (!isAddedByMe) {
+          throw new AppError('Access denied: You are not authorized to update this vendor.', 403);
+      }
   }
 
   const oldVendor = vendor.toObject();
 
-  // Update fields
-  for (const key of Object.keys(updateData)) {
-    if (updateData[key] !== undefined) {
-      if (key === 'services' && Array.isArray(updateData[key])) {
-        const normalizedServices = updateData[key].map(s => s.toLowerCase());
-        const invalidServices = normalizedServices.filter(s => !SERVICE_ENUM_SET.has(s));
-        if (invalidServices.length > 0) {
-          throw new AppError(`Invalid service(s): ${invalidServices.join(', ')}. Allowed: ${SERVICE_ENUM.join(', ')}`, 400);
-        }
-        vendor.services = normalizedServices;
-      } else if (key === 'status') {
-        const normalizedStatus = updateData[key].toLowerCase();
-        if (!STATUS_ENUM_SET.has(normalizedStatus)) {
-          throw new AppError(`Invalid vendor status: ${updateData[key]}. Allowed: ${STATUS_ENUM.join(', ')}`, 400);
-        }
-        vendor.status = normalizedStatus;
-      } else if (key === 'associatedProperties') {
-        vendor.associatedProperties = updateData.associatedProperties;
-      } else {
-        vendor[key] = updateData[key];
-      }
-    }
-  }
+  Object.assign(vendor, updateData);
 
   let updatedVendor;
   try {
-    updatedVendor = await vendor.save();
+      updatedVendor = await vendor.save();
   } catch (err) {
-    if (err.code === 11000 && err.keyPattern && err.keyPattern.email) {
-      throw new AppError('A vendor with that email already exists.', 400);
-    }
-    throw err;
+      if (err.code === 11000 && err.keyPattern && err.keyPattern.email) {
+          throw new AppError('A vendor with that email already exists.', 400);
+      }
+      throw err;
   }
 
   await createAuditLog({
-    action: AUDIT_ACTION_ENUM.find(a => a === 'VENDOR_UPDATED') || 'UPDATE',
+    action: AUDIT_ACTION_ENUM.VENDOR_UPDATED,
     user: updatedByUserId,
-    resourceType: AUDIT_RESOURCE_TYPE_ENUM.find(r => r === 'Vendor') || 'Vendor',
+    resourceType: 'Vendor',
     resourceId: updatedVendor._id,
     oldValue: oldVendor,
     newValue: updatedVendor.toObject(),
@@ -353,31 +263,16 @@ const deleteVendor = async (vendorId, user, ipAddress) => {
 
   const oldVendor = vendorToDelete.toObject();
 
-  // 1. Remove PropertyUser associations
-  await PropertyUser.deleteMany({ user: vendorId, roles: PROPERTY_USER_ROLES_ENUM[3] }); // vendor_access
-  logger.info(`VendorService: Deleted PropertyUser associations for vendor ${vendorToDelete.name}.`);
-
-  // 2. Update Requests assigned to this vendor
-  await Request.updateMany(
-    { assignedTo: vendorId, assignedToModel: 'Vendor' },
-    { $set: { assignedTo: null, assignedToModel: null, status: 'new' } }
-  );
-  logger.info(`VendorService: Updated Request assignments for vendor ${vendorToDelete.name}.`);
-
-  // 3. Update ScheduledMaintenance assigned to this vendor
-  await ScheduledMaintenance.updateMany(
-    { assignedTo: vendorId, assignedToModel: 'Vendor' },
-    { $set: { assignedTo: null, assignedToModel: null, status: 'scheduled' } }
-  );
-  logger.info(`VendorService: Updated ScheduledMaintenance assignments for vendor ${vendorToDelete.name}.`);
-
-  // 4. Delete the vendor
+  await PropertyUser.deleteMany({ user: vendorId, roles: 'vendor_access' });
+  await Request.updateMany({ assignedTo: vendorId, assignedToModel: 'Vendor' }, { $set: { assignedTo: null, assignedToModel: null, status: 'new' } });
+  await ScheduledMaintenance.updateMany({ assignedTo: vendorId, assignedToModel: 'Vendor' }, { $set: { assignedTo: null, assignedToModel: null, status: 'scheduled' } });
+  
   await vendorToDelete.deleteOne();
 
   await createAuditLog({
-    action: AUDIT_ACTION_ENUM.find(a => a === 'VENDOR_DEACTIVATED') || 'DELETE',
+    action: AUDIT_ACTION_ENUM.VENDOR_DEACTIVATED,
     user: user._id,
-    resourceType: AUDIT_RESOURCE_TYPE_ENUM.find(r => r === 'Vendor') || 'Vendor',
+    resourceType: 'Vendor',
     resourceId: vendorId,
     oldValue: oldVendor,
     newValue: null,
