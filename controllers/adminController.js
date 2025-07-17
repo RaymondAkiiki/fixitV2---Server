@@ -31,14 +31,15 @@ const {
   UNIT_STATUS_ENUM,
   FREQUENCY_TYPE_ENUM,
   PROPERTY_USER_ROLES_ENUM, // Added for property user updates
+  REGISTRATION_STATUS_ENUM,
   // ... any other ENUMs you need directly in the controller
 } = require('../utils/constants/enums'); // <-- New path!
 
 // Import Services
-const { sendEmail } = require('../services/emailService'); // <-- New service import
-const { uploadFile, deleteFile, getFileUrl } = require('../services/cloudStorageService'); // <-- New Cloud Storage Service import
+const emailService = require('../services/emailService'); // <-- New service import
+const { uploadFileBuffer, deleteFile, getFileUrl } = require('../services/cloudStorageService'); // <-- New Cloud Storage Service import
 const { sendNotification } = require('../services/notificationService'); // <-- New Notification Service import
-const { registerUser, loginUser, requestPasswordReset, resetPassword, updatePassword, sendEmailVerification } = require('../services/authService'); // <-- New Auth Service import
+const authService = require('../services/authService'); // <-- New Auth Service import
 
 // Import Utilities
 const { createAuditLog } = require('../services/auditService'); 
@@ -203,7 +204,7 @@ exports.createUser = [
             const { firstName, lastName, email, phone, password, role } = req.body;
 
             // Use authService to handle registration logic
-            const newUser = await registerUser({
+            const newUser = await authService.registerUser({
                 firstName,
                 lastName,
                 email,
@@ -248,10 +249,10 @@ exports.updateUser = async (req, res) => {
             }
             user.email = email;
         }
-        if (role && ROLE_ENUM.includes(role)) user.role = role;
+        if (role && Object.values(ROLE_ENUM).includes(role)) user.role = role;
         if (typeof isActive === 'boolean') user.isActive = isActive;
         if (preferences) user.preferences = { ...user.preferences, ...preferences };
-        if (registrationStatus && REGISTRATION_STATUS_ENUM.includes(registrationStatus)) user.registrationStatus = registrationStatus;
+        if (registrationStatus && Object.values(REGISTRATION_STATUS_ENUM).includes(registrationStatus)) user.registrationStatus = registrationStatus;
 
         await user.save({ validateBeforeSave: true }); // Validate on save
 
@@ -376,7 +377,7 @@ exports.adminResetUserPassword = async (req, res) => {
     const { newPassword } = req.body;
 
     // Basic validation for new password
-    const validationErrors = validationResult(req); // Need to define check in route or here for simplicity
+    const validationErrors = validateResult(req); // Need to define check in route or here for simplicity
     if (!newPassword || newPassword.length < 8) { // Basic check, better to use express-validator here
         return sendErrorResponse(res, 400, 'New password must be at least 8 characters long.');
     }
@@ -626,7 +627,7 @@ exports.createUnit = async (req, res) => {
             rentAmount,
             depositAmount,
             status: status || UNIT_STATUS_ENUM[0], // Default 'occupied' or 'vacant'
-            utilityResponsibility: utilityResponsibility || UTILITY_RESPONSIBILITY_ENUM[0],
+            utilityResponsibility,
             notes,
             lastInspected
         });
@@ -829,8 +830,8 @@ exports.getRequestById = async (req, res) => {
  */
 exports.updateRequestStatus = async (req, res) => {
     const { status } = req.body;
-    if (!status || !REQUEST_STATUS_ENUM.includes(status)) {
-        return sendErrorResponse(res, 400, `Invalid status provided. Must be one of: ${REQUEST_STATUS_ENUM.join(', ')}`);
+    if (!status || !Object.values(REQUEST_STATUS_ENUM).includes(status)) {
+        return sendErrorResponse(res, 400, `Invalid status provided. Must be one of: ${Object.values(REQUEST_STATUS_ENUM).join(', ')}`);
     }
 
     try {
@@ -1216,7 +1217,7 @@ exports.getInviteById = async (req, res) => {
 exports.createInvite = async (req, res) => {
     const { email, role, propertyId, unitId } = req.body;
 
-    if (!email || !role || !PROPERTY_USER_ROLES_ENUM.includes(role)) {
+    if (!email || !role || !Object.values(PROPERTY_USER_ROLES_ENUM).includes(role)) {
         return sendErrorResponse(res, 400, 'Email and a valid role are required.');
     }
 
@@ -1268,16 +1269,13 @@ exports.createInvite = async (req, res) => {
         const inviteLink = `${process.env.FRONTEND_URL}/accept-invite/${token}`;
 
         // Send invitation email
-        await sendEmail(
-            email,
-            `Invitation to Property Management System - Role: ${role}`,
-            `You have been invited to join the Property Management System as a ${role}. Use the following link to accept the invitation: ${inviteLink}`,
-            `<p>You have been invited to join the Property Management System as a <strong>${role}</strong>.</p>` +
-            `<p>Please click the link below to accept your invitation:</p>` +
-            `<p><a href="${inviteLink}">${inviteLink}</a></p>` +
-            `<p>This link will expire in 7 days.</p>` +
-            `<p>If you have any questions, please contact the administrator.</p>`
-        );
+        await emailService.sendInvitationEmail({
+            to: email,
+            inviteLink,
+            role,
+            invitedByUserName: req.user.firstName,
+            propertyDisplayName: propertyId ? (await Property.findById(propertyId).select('name')).name : 'the system'
+        });
 
         createAuditLog(req.user.id, AUDIT_ACTION_ENUM.INVITE_SENT, `Sent invite to ${email} for role ${role}`, AUDIT_RESOURCE_TYPE_ENUM.Invite, null, newInvite);
         res.status(201).json({ success: true, message: 'Invitation sent successfully.', data: newInvite });
@@ -1311,16 +1309,13 @@ exports.resendInvite = async (req, res) => {
 
         const inviteLink = `${process.env.FRONTEND_URL}/accept-invite/${invite.token}`;
 
-        await sendEmail(
-            invite.email,
-            `Resent Invitation to Property Management System - Role: ${invite.role}`,
-            `Your invitation to join the Property Management System as a ${invite.role} has been resent. Use the following link to accept the invitation: ${inviteLink}`,
-            `<p>Your invitation to join the Property Management System as a <strong>${invite.role}</strong> has been resent.</p>` +
-            `<p>Please click the link below to accept your invitation:</p>` +
-            `<p><a href="${inviteLink}">${inviteLink}</a></p>` +
-            `<p>This link will expire in 7 days.</p>` +
-            `<p>If you have any questions, please contact the administrator.</p>`
-        );
+        await emailService.sendInvitationEmail({
+            to: invite.email,
+            inviteLink,
+            role: invite.role,
+            invitedByUserName: req.user.firstName,
+            propertyDisplayName: invite.property ? (await Property.findById(invite.property).select('name')).name : 'the system'
+        });
 
         createAuditLog(req.user.id, AUDIT_ACTION_ENUM.INVITE_SENT, `Resent invite to ${invite.email} for role ${invite.role}`, AUDIT_RESOURCE_TYPE_ENUM.Invite, null, invite);
         res.status(200).json({ success: true, message: 'Invitation resent successfully.', data: invite });
@@ -1638,15 +1633,12 @@ exports.deleteMedia = async (req, res) => {
             return sendErrorResponse(res, 404, 'Media file not found.');
         }
 
-        // Extract public_id from Cloudinary URL for deletion
-        // Example Cloudinary URL: https://res.cloudinary.com/your_cloud_name/image/upload/v1678886400/folder/subfolder/public_id.jpg
-        const urlParts = mediaDoc.url.split('/');
-        // The public_id is usually the part after the version ('v...') and before the extension, including folders
-        const publicIdWithFolder = urlParts.slice(urlParts.indexOf('upload') + 2).join('/').split('.')[0];
-        const resourceType = mediaDoc.mimeType.startsWith('image/') ? 'image' : mediaDoc.mimeType.startsWith('video/') ? 'video' : 'raw';
+        // publicId is stored in the mediaDoc
+        const publicId = mediaDoc.public_id || mediaDoc.filename;
+        const resourceType = mediaDoc.resource_type || (mediaDoc.mimeType.startsWith('image/') ? 'image' : mediaDoc.mimeType.startsWith('video/') ? 'video' : 'raw');
 
         // Delete from Cloudinary
-        await deleteFile(publicIdWithFolder, resourceType);
+        await deleteFile(publicId, resourceType);
 
         // Delete from MongoDB
         await mediaDoc.deleteOne();
@@ -1996,7 +1988,7 @@ exports.updateRentPayment = async (req, res) => {
                 rent.status = 'due';
             }
         }
-        if (updates.status && PAYMENT_STATUS_ENUM.includes(updates.status)) {
+        if (updates.status && Object.values(PAYMENT_STATUS_ENUM).includes(updates.status)) {
             rent.status = updates.status;
         }
 
@@ -2296,7 +2288,7 @@ exports.createPropertyUser = async (req, res) => {
         }
 
         // Validate roles against enum
-        const invalidRoles = roles.filter(role => !PROPERTY_USER_ROLES_ENUM.includes(role));
+        const invalidRoles = roles.filter(role => !Object.values(PROPERTY_USER_ROLES_ENUM).includes(role));
         if (invalidRoles.length > 0) {
             return sendErrorResponse(res, 400, `Invalid roles provided: ${invalidRoles.join(', ')}`);
         }
@@ -2350,7 +2342,7 @@ exports.updatePropertyUser = async (req, res) => {
             if (!Array.isArray(roles) || roles.length === 0) {
                 return sendErrorResponse(res, 400, 'Roles must be a non-empty array.');
             }
-            const invalidRoles = roles.filter(role => !PROPERTY_USER_ROLES_ENUM.includes(role));
+            const invalidRoles = roles.filter(role => !Object.values(PROPERTY_USER_ROLES_ENUM).includes(role));
             if (invalidRoles.length > 0) {
                 return sendErrorResponse(res, 400, `Invalid roles provided: ${invalidRoles.join(', ')}`);
             }
@@ -2456,10 +2448,9 @@ exports.deleteComment = async (req, res) => {
             for (const mediaId of comment.media) {
                 const mediaDoc = await Media.findById(mediaId);
                 if (mediaDoc) {
-                    const urlParts = mediaDoc.url.split('/');
-                    const publicIdWithFolder = urlParts.slice(urlParts.indexOf('upload') + 2).join('/').split('.')[0];
-                    const resourceType = mediaDoc.mimeType.startsWith('image/') ? 'image' : mediaDoc.mimeType.startsWith('video/') ? 'video' : 'raw';
-                    await deleteFile(publicIdWithFolder, resourceType).catch(err => logger.error(`Failed to delete Cloudinary file ${publicIdWithFolder}:`, err));
+                    const publicId = mediaDoc.public_id || mediaDoc.filename;
+                    const resourceType = mediaDoc.resource_type || (mediaDoc.mimeType.startsWith('image/') ? 'image' : mediaDoc.mimeType.startsWith('video/') ? 'video' : 'raw');
+                    await deleteFile(publicId, resourceType).catch(err => logger.error(`Failed to delete Cloudinary file ${publicId}:`, err));
                     await mediaDoc.deleteOne(); // Delete media doc from DB
                 }
             }

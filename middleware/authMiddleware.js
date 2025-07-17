@@ -1,7 +1,7 @@
 // src/middleware/authMiddleware.js
 
 const jwt = require("jsonwebtoken");
-const asyncHandler = require('./asyncHandler');
+const asyncHandler = require('../utils/asyncHandler');
 const User = require("../models/user");
 const PropertyUser = require("../models/propertyUser");
 const Property = require("../models/property"); // Ensure Property model is imported for unit checks

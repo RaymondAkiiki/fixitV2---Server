@@ -394,12 +394,12 @@ async function createInAppNotification(
         }
 
         // Ensure the type is a valid enum value
-        if (!NOTIFICATION_TYPE_ENUM.includes(type)) {
+        if (!Object.values(NOTIFICATION_TYPE_ENUM).includes(type)) {
             logger.warn(`Invalid notification type "${type}" provided for in-app notification.`);
         }
 
         // Ensure relatedResource.kind is a valid enum value
-        if (!AUDIT_RESOURCE_TYPE_ENUM.includes(relatedResource.kind)) {
+        if (!Object.values(AUDIT_RESOURCE_TYPE_ENUM).includes(relatedResource.kind)) {
             logger.warn(`Invalid related resource kind "${relatedResource.kind}" provided for in-app notification.`);
         }
 
@@ -455,7 +455,7 @@ async function getNotifications(userId, filters = {}, page = 1, limit = 10) {
         query.read = filters.readStatus === 'read';
     }
     if (filters.type) {
-        if (!NOTIFICATION_TYPE_ENUM.includes(filters.type)) {
+        if (!Object.values(NOTIFICATION_TYPE_ENUM).includes(filters.type)) {
             throw new AppError(`Invalid notification type filter: ${filters.type}`, 400);
         }
         query.type = filters.type;
@@ -487,6 +487,61 @@ async function getNotifications(userId, filters = {}, page = 1, limit = 10) {
     }
 }
 
+/**
+ * Central notification sending function.
+ * @param {object} params
+ * @param {string} params.recipientId
+ * @param {string} params.type
+ * @param {string} params.message
+ * @param {string} [params.link]
+ * @param {string} params.relatedResourceType
+ * @param {string} params.relatedResourceId
+ * @param {object} [params.emailDetails] - { subject, html, text }
+ * @param {string} [params.senderId]
+ */
+async function sendNotification({
+    recipientId,
+    type,
+    message,
+    link,
+    relatedResourceType,
+    relatedResourceId,
+    emailDetails,
+    senderId = null
+}) {
+    try {
+        // In-app notification
+        await createInAppNotification(
+            recipientId,
+            type,
+            message,
+            { kind: relatedResourceType, item: relatedResourceId },
+            link,
+            {}, // contextData
+            senderId
+        );
+
+        // Email notification
+        const User = require('../models/user'); // Avoid circular dependency
+        const recipient = await User.findById(recipientId).select('email preferences');
+
+        if (recipient && recipient.email && emailDetails) {
+            const canSendEmail = !recipient.preferences || recipient.preferences.emailNotifications?.[type] !== false; // default to true
+            if (canSendEmail) {
+                await emailService.sendEmail({
+                    to: recipient.email,
+                    subject: emailDetails.subject,
+                    html: emailDetails.html,
+                    text: emailDetails.text || emailDetails.html.replace(/<[^>]*>?/gm, ''), // basic text version
+                });
+            }
+        }
+    } catch (error) {
+        logger.error(`Failed to send notification for recipient ${recipientId}: ${error.message}`, error);
+        // Do not rethrow to avoid halting a process that sends multiple notifications
+    }
+}
+
 
 module.exports = {
     sendDailyDigest,
@@ -495,5 +550,6 @@ module.exports = {
     sendMaintenanceRequestGenerated,
     sendMaintenanceReminder,
     createInAppNotification,
-    getNotifications, // <--- EXPORT THE NEW FUNCTION HERE
+    getNotifications,
+    sendNotification,
 };
