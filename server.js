@@ -8,7 +8,7 @@ const rateLimit = require('express-rate-limit');
 const morgan = require('morgan');
 const connectDB = require('./config/db');
 const path = require('path');
-const errorHandler = require('./middleware/errorMiddleware'); // Ensure this is imported
+const { errorHandler } = require('./middleware/errorMiddleware'); // Ensure this is imported
 
 // Connect to MongoDB
 connectDB();
@@ -84,7 +84,6 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/onboarding', onboardingRoutes);
 app.use('/api/properties', propertyRoutes);
 app.use('/api/units', unitRoutes);
-app.use('/api/properties', unitRoutes); // For property-nested unit routes
 app.use('/api/leases', leaseRoutes);
 app.use('/api/rents', rentRoutes);
 app.use('/api/requests', requestRoutes);

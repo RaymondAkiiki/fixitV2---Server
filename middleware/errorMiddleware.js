@@ -92,4 +92,13 @@ const errorMiddleware = (err, req, res, next) => {
     });
 };
 
-module.exports = errorMiddleware;
+// 404 handler for routes that don't exist
+const notFound = (req, res, next) => {
+    const error = new AppError(`API endpoint not found: ${req.originalUrl}`, 404);
+    next(error);
+};
+
+module.exports = {
+    errorHandler: errorMiddleware,
+    notFound
+};
