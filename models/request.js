@@ -1,118 +1,124 @@
-// backend/models/Request.js
-
+// server/models/request.js
 const mongoose = require('mongoose');
-const crypto = require('crypto'); // For generating public token
+const crypto = require('crypto');
+const { CATEGORY_ENUM, PRIORITY_ENUM, REQUEST_STATUS_ENUM, ASSIGNED_TO_MODEL_ENUM } = require('../utils/constants/enums');
+const feedbackSubSchema = require('./schemas/FeedbackSubSchema');
 
 const requestSchema = new mongoose.Schema({
-    title: { 
-        type: String, 
+    title: {
+        type: String,
         required: [true, 'Request title is required.'],
-        trim: true
+        trim: true,
+        maxlength: [200, 'Title cannot exceed 200 characters.']
     },
-    description: { 
-        type: String, 
-        maxlength: [1000, 'Description cannot exceed 1000 characters.'],
-        default: null 
+    description: {
+        type: String,
+        required: [true, 'Description is required for the request.'],
+        maxlength: [2000, 'Description cannot exceed 2000 characters.'],
+        default: null
     },
-    category: { // Category of the maintenance issue
-        type: String, 
-        enum: ['plumbing', 'electrical', 'hvac', 'appliance', 'structural', 'landscaping', 'other', 'security', 'pest_control', 'cleaning', 'scheduled'], // Consistent lowercase, expanded
+    category: {
+        type: String,
+        enum: {
+            values: CATEGORY_ENUM,
+            message: '"{VALUE}" is not a supported category.'
+        },
         required: [true, 'Category is required.'],
-        lowercase: true
+        lowercase: true,
+        index: true
     },
-    priority: { 
-        type: String, 
-        enum: ['low', 'medium', 'high', 'urgent'], // Consistent lowercase
-        default: 'low', 
-        lowercase: true
+    priority: {
+        type: String,
+        enum: PRIORITY_ENUM,
+        default: 'low',
+        lowercase: true,
+        index: true
     },
-    media: [{ // Array of URLs to media files (photos, videos) stored in cloud storage
-        type: String // Changed from `Media` ObjectId reference to direct URL string
+    media: [{ // Now referencing Media model directly for consistency
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Media'
     }],
-    status: { // Current status of the request
-        type: String, 
-        enum: ['new', 'assigned', 'in_progress', 'completed', 'verified', 'reopened', 'archived'], // Expanded statuses, consistent lowercase
-        default: 'new', 
+    status: {
+        type: String,
+        enum: REQUEST_STATUS_ENUM,
+        default: 'new',
         index: true,
         lowercase: true
     },
-    property: { 
-        type: mongoose.Schema.Types.ObjectId, 
-        ref: 'Property', 
-        required: [true, 'Property is required for the request.'], 
-        index: true 
+    property: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Property',
+        required: [true, 'Property is required for the request.'],
+        index: true
     },
-    unit: { 
-        type: mongoose.Schema.Types.ObjectId, 
-        ref: 'Unit', 
-        required: null,
-        index: true 
+    unit: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Unit',
+        default: null,
+        index: true,
+        sparse: true
     },
-    createdBy: { // The user (Tenant, PM, or Landlord) who submitted the request
-        type: mongoose.Schema.Types.ObjectId, 
-        ref: 'User', 
+    createdBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
         required: [true, 'Creator is required for the request.']
     },
-    // Polymorphic assignment: can be assigned to a User (PM/Landlord/Admin) or a Vendor
-    assignedTo: { 
-        type: mongoose.Schema.Types.ObjectId, 
-        refPath: 'assignedToModel', 
-        default: null 
-    }, 
-    assignedToModel: { // Stores the model name ('User' or 'Vendor') for `assignedTo`
-        type: String, 
-        enum: ['User', 'Vendor'], 
-        default: null 
+    assignedTo: {
+        type: mongoose.Schema.Types.ObjectId,
+        refPath: 'assignedToModel',
+        default: null
     },
-    assignedBy: { // The user (PM/Landlord) who assigned the request
-        type: mongoose.Schema.Types.ObjectId, 
-        ref: 'User', 
-        default: null 
+    assignedToModel: {
+        type: String,
+        enum: ASSIGNED_TO_MODEL_ENUM,
+        default: null
     },
-    resolvedAt: { 
-        type: Date, 
-        default: null 
+    assignedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        default: null
     },
-    comments: [ // Embedded array of comments for the request
-        {
-            sender: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-            message: { type: String, required: true, maxlength: [1000, 'Comment message cannot exceed 1000 characters.'] },
-            timestamp: { type: Date, default: Date.now }
-        }
-    ],
-    verifiedBy: { // User (PM/Landlord) who verified the completion of the request
-        type: mongoose.Schema.Types.ObjectId, 
-        ref: 'User', 
-        default: null 
+    assignedAt: {
+        type: Date,
+        default: null
     },
-    // Renamed `approvedBy` to `verifiedBy` for clarity based on "Verified" status.
-    // Removed `tenantRef` as `createdBy` should directly reference the reporter.
-    // If a PM submits on behalf of a tenant, `createdBy` is the PM, and a specific "on_behalf_of_tenant" field might be needed,
-    // but typically the actual tenant submits or their user ID is passed through.
-
-    feedback: { // Tenant's feedback after request completion
-        rating: { type: Number, min: 1, max: 5 },
-        comment: { type: String, maxlength: [1000, 'Feedback comment cannot exceed 1000 characters.'] },
-        submittedAt: { type: Date }
+    resolvedAt: {
+        type: Date,
+        default: null
     },
-
-    // Public link for external vendors
-    publicToken: { 
-        type: String, 
-        unique: true, 
-        sparse: true 
-    }, // Unique token for public access
-    publicLinkEnabled: { 
-        type: Boolean, 
-        default: false 
+    completedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        refPath: 'completedByModel',
+        default: null
     },
-    publicLinkExpiresAt: { 
-        type: Date, 
-        default: null 
+    completedByModel: {
+        type: String,
+        enum: ASSIGNED_TO_MODEL_ENUM, // Reusing ASSIGNED_TO_MODEL_ENUM for consistency
+        default: null
+    },
+    feedback: feedbackSubSchema,
+    generatedFromScheduledMaintenance: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'ScheduledMaintenance',
+        default: null
+    },
+    publicToken: {
+        type: String,
+        unique: true,
+        sparse: true,
+        index: true
+    },
+    publicLinkEnabled: {
+        type: Boolean,
+        default: false
+    },
+    publicLinkExpiresAt: {
+        type: Date,
+        default: null
     },
 
-}, { 
-    timestamps: true 
+}, {
+    timestamps: true
 });
 
 /**
@@ -123,14 +129,13 @@ const requestSchema = new mongoose.Schema({
  */
 requestSchema.methods.enablePublicLink = async function(expiryDate = null) {
     if (!this.publicToken) {
-        this.publicToken = crypto.randomBytes(24).toString('hex'); // Generate cryptographically secure token
+        this.publicToken = crypto.randomBytes(24).toString('hex');
     }
     this.publicLinkEnabled = true;
     if (expiryDate) {
         this.publicLinkExpiresAt = expiryDate;
     } else {
-        // Default expiry (e.g., 7 days if no specific expiry is given)
-        this.publicLinkExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); 
+        this.publicLinkExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
     }
     await this.save();
     return this.publicToken;
@@ -138,8 +143,8 @@ requestSchema.methods.enablePublicLink = async function(expiryDate = null) {
 
 // Indexes for common queries
 requestSchema.index({ property: 1, unit: 1, status: 1 });
-requestSchema.index({ createdBy: 1, status: 1 }); // For filtering requests by reporter
-requestSchema.index({ assignedTo: 1, status: 1 }); // For filtering requests by assignee
-requestSchema.index({ publicToken: 1 }); // For quick public link lookups
+requestSchema.index({ createdBy: 1, status: 1 });
+requestSchema.index({ assignedTo: 1, status: 1 });
+requestSchema.index({ createdAt: -1 });
 
 module.exports = mongoose.models.Request || mongoose.model('Request', requestSchema);

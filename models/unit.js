@@ -1,49 +1,64 @@
-// backend/models/Unit.js
-
+// server/models/unit.js
 const mongoose = require('mongoose');
+const { UNIT_STATUS_ENUM, UTILITY_RESPONSIBILITY_ENUM } = require('../utils/constants/enums');
 
 const unitSchema = new mongoose.Schema({
-    unitName: { // e.g., "A101", "Apt 203"
-        type: String, 
-        required: [true, 'Unit name is required.'],
-        trim: true
-    }, 
-    floor: { 
-        type: String,
-        trim: true
-    },
-    details: { // e.g., "2 bed, 2 bath", "Corner unit with balcony"
-        type: String, 
-        maxlength: [1000, 'Details cannot exceed 1000 characters.'],
-        default: null 
-    },
-    property: { // The property this unit belongs to
-        type: mongoose.Schema.Types.ObjectId, 
-        ref: 'Property', 
-        index: true, 
-        required: [true, 'Unit must belong to a property.'] 
-    },
-    tenants: [{ // Array of current tenants residing in this unit (for multiple tenants/roommates)
-        type: mongoose.Schema.Types.ObjectId, 
-        ref: 'User' 
-    }], 
-    // Removed single `tenant` field as `tenants` array is more flexible for roommates.
-
-    // Optional: Add other unit-specific details
-    numBedrooms: { type: Number, min: 0 },
-    numBathrooms: { type: Number, min: 0 },
-    squareFootage: { type: Number, min: 0 },
-    rentAmount: { type: Number, min: 0 },
-    status: { type: String, enum: ['occupied', 'vacant', 'under_maintenance', 'unavailable'], default: 'vacant', lowercase: true }
-
-}, { 
-    timestamps: true 
+  unitName: {
+    type: String,
+    required: [true, 'Unit name is required.'],
+    trim: true,
+    maxlength: [50, 'Unit name cannot exceed 50 characters.']
+  },
+  floor: {
+    type: String,
+    trim: true,
+    default: null,
+    maxlength: [20, 'Floor number/name cannot exceed 20 characters.']
+  },
+  details: {
+    type: String,
+    maxlength: [1000, 'Details cannot exceed 1000 characters.'],
+    default: null
+  },
+  property: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Property',
+    required: [true, 'Unit must belong to a property.']
+  },
+  numBedrooms: { type: Number, min: [0, 'Number of bedrooms cannot be negative.'], default: null },
+  numBathrooms: { type: Number, min: [0, 'Number of bathrooms cannot be negative.'], default: null },
+  squareFootage: { type: Number, min: [0, 'Square footage cannot be negative.'], default: null },
+  rentAmount: { type: Number, min: [0, 'Rent amount cannot be negative.'], default: null },
+  depositAmount: { type: Number, min: [0, 'Deposit amount cannot be negative.'], default: null },
+  status: {
+    type: String,
+    enum: UNIT_STATUS_ENUM,
+    default: 'vacant',
+    lowercase: true
+  },
+  utilityResponsibility: {
+    type: String,
+    enum: UTILITY_RESPONSIBILITY_ENUM,
+    default: 'tenant_pays_all',
+    lowercase: true
+  },
+  notes: {
+    type: String,
+    maxlength: [2000, 'Notes cannot exceed 2000 characters.'],
+    default: null
+  },
+  lastInspected: { type: Date, default: null },
+  unitImages: [{ // Changed to reference Media model directly for consistency
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Media'
+  }]
+}, {
+  timestamps: true
 });
 
-// Ensure unitName is unique within a specific property
+// Indexes
 unitSchema.index({ property: 1, unitName: 1 }, { unique: true });
-
-// Index for efficient lookup of units by tenants
-unitSchema.index({ tenants: 1 });
+unitSchema.index({ status: 1 });
+unitSchema.index({ numBedrooms: 1 });
 
 module.exports = mongoose.models.Unit || mongoose.model('Unit', unitSchema);

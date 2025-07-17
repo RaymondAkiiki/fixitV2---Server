@@ -1,82 +1,85 @@
-// backend/routes/vendorRoutes.js
+// src/routes/vendorRoutes.js
 
-const express = require("express");
-const { body, param } = require('express-validator');
+const express = require('express');
 const router = express.Router();
-const vendorController = require("../controllers/vendorController"); // Corrected import
-const { protect, authorizeRoles } = require("../middleware/authMiddleware"); // Corrected import
+const { query } = require('express-validator');
+const vendorController = require('../controllers/vendorController'); // Import vendor controller
+const { protect, authorizeRoles } = require('../middleware/authMiddleware'); // Import auth middleware
+const { validateMongoId, validateVendor, validateResult } = require('../utils/validationUtils'); // Import validation utilities
+const { ROLE_ENUM } = require('../utils/constants/enums'); // Import enums for roles
 
-// --- Validation Schemas ---
-
-const vendorBodyValidation = [
-    body('name').notEmpty().withMessage('Name is required.'),
-    body('phone').notEmpty().withMessage('Phone is required.'),
-    body('email').isEmail().withMessage('Valid email required.').normalizeEmail(),
-    body('description').optional().isString().isLength({ max: 1000 }).withMessage('Description cannot exceed 1000 characters.'),
-    body('services').isArray({ min: 1 }).withMessage('At least one service required.').custom(value => {
-        // Custom validation to ensure all services are valid enum values (lowercase)
-        const allowedServices = ['plumbing', 'electrical', 'hvac', 'appliance', 'structural', 'landscaping', 'other', 'cleaning', 'security', 'pest_control'];
-        if (!value.every(service => allowedServices.includes(service.toLowerCase()))) {
-            throw new Error(`Invalid service(s) provided. Allowed: ${allowedServices.join(', ')}`);
-        }
-        return true;
-    }),
-    body('address').optional().isString(),
-    // Removed `contactPerson` and `photo` as they are not in the current Vendor model.
-    // Added back `properties` field if the intention was to link vendors to properties at creation.
-    // If not, this field should be removed. For now, it's commented out based on prev discussion.
-    // body('properties').optional().isArray().withMessage('Properties must be an array of IDs.'),
-    // body('properties.*').optional().isMongoId().withMessage('Invalid property ID in properties array.'),
-];
-
-const vendorIdParamValidation = [
-    param('id').isMongoId().withMessage('Invalid vendor ID in URL.'),
-];
-
-// --- ROUTES ---
-
-// GET /api/vendors - Get all vendors
-router.get(
-    "/",
+/**
+ * @route POST /api/vendors
+ * @desc Create a new vendor
+ * @access Private (Admin, PropertyManager, Landlord)
+ */
+router.post(
+    '/',
     protect,
-    authorizeRoles('admin', 'landlord', 'propertymanager'), // Only authorized roles can list vendors
+    authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.PROPERTY_MANAGER, ROLE_ENUM.LANDLORD),
+    validateVendor, // Apply comprehensive vendor validation
+    vendorController.createVendor
+);
+
+/**
+ * @route GET /api/vendors
+ * @desc Get all vendors with filtering, search, and pagination
+ * @access Private (Admin, PropertyManager, Landlord)
+ */
+router.get(
+    '/',
+    protect,
+    authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.PROPERTY_MANAGER, ROLE_ENUM.LANDLORD),
+    // Query parameter validation (optional, but good practice)
+    [
+        query('status').optional().isIn(['active', 'inactive']).withMessage('Invalid status filter.'),
+        query('serviceTag').optional().isString().trim().withMessage('Service tag must be a string.'),
+        query('propertyId').optional().isMongoId().withMessage('Invalid Property ID format.'),
+        query('search').optional().isString().trim().withMessage('Search query must be a string.'),
+        query('page').optional().isInt({ min: 1 }).withMessage('Page must be a positive integer.'),
+        query('limit').optional().isInt({ min: 1 }).withMessage('Limit must be a positive integer.'),
+        validateResult // Apply validation result handler for queries
+    ],
     vendorController.getAllVendors
 );
 
-// GET /api/vendors/:id - Get a specific vendor by ID
+/**
+ * @route GET /api/vendors/:id
+ * @desc Get a specific vendor by ID
+ * @access Private (Admin, PropertyManager, Landlord - with access control)
+ */
 router.get(
-    "/:id",
+    '/:id',
     protect,
-    authorizeRoles('admin', 'landlord', 'propertymanager'), // Only authorized roles can view specific vendors
-    vendorIdParamValidation,
+    authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.PROPERTY_MANAGER, ROLE_ENUM.LANDLORD),
+    validateMongoId('id'), // Validate ID in params
     vendorController.getVendorById
 );
 
-// POST /api/vendors - Add a new vendor
-router.post(
-    "/",
-    protect,
-    authorizeRoles('admin', 'landlord', 'propertymanager'), // Only authorized roles can add vendors
-    vendorBodyValidation,
-    vendorController.addVendor
-);
-
-// PUT /api/vendors/:id - Update vendor details
+/**
+ * @route PUT /api/vendors/:id
+ * @desc Update vendor details
+ * @access Private (Admin, PropertyManager, Landlord - for vendors they added/manage)
+ */
 router.put(
-    "/:id",
+    '/:id',
     protect,
-    authorizeRoles('admin', 'landlord', 'propertymanager'), // Only authorized roles can update vendors
-    vendorIdParamValidation,
-    vendorBodyValidation, // Use the same validation for update, making fields optional where needed
+    authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.PROPERTY_MANAGER, ROLE_ENUM.LANDLORD),
+    validateMongoId('id'), // Validate ID in params
+    validateVendor, // Reuse vendor validation for updates (optional fields handled by optional())
     vendorController.updateVendor
 );
 
-// DELETE /api/vendors/:id - Delete a vendor
+/**
+ * @route DELETE /api/vendors/:id
+ * @desc Delete a vendor
+ * @access Private (Admin only)
+ */
 router.delete(
-    "/:id",
+    '/:id',
     protect,
-    authorizeRoles('admin', 'landlord', 'propertymanager'), // Only authorized roles can delete vendors
-    vendorIdParamValidation,
+    authorizeRoles(ROLE_ENUM.ADMIN), // Only global admin can delete vendors
+    validateMongoId('id'), // Validate ID in params
     vendorController.deleteVendor
 );
 

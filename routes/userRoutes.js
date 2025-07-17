@@ -1,85 +1,150 @@
-// backend/routes/userRoutes.js
+// src/routes/userRoutes.js
 
 const express = require('express');
-const { body, param, query } = require('express-validator'); // Import validation functions
 const router = express.Router();
-const userController = require('../controllers/userController'); // Corrected import path
-const { protect, authorizeRoles } = require('../middleware/authMiddleware'); // Corrected import path
+const userController = require('../controllers/userController'); // Import user controller
+const { protect, authorizeRoles, authorizePropertyAccess } = require('../middleware/authMiddleware'); // Import auth middleware
+const {
+    validateMongoId,
+    validateUserRegistration, // For createUser
+    validateResult,
+    emailValidator,
+    passwordValidator // For manual user creation (temp password)
+} = require('../utils/validationUtils'); // Import validation utilities
+const { ROLE_ENUM, PROPERTY_USER_ROLES_ENUM , REGISTRATION_STATUS_ENUM} = require('../utils/constants/enums'); // Import enums for roles
+const { body, query } = require('express-validator');
 
-// --- Validation Schemas ---
+// Routes for the authenticated user's own profile
+router.route('/profile')
+    .get(protect, userController.getUserProfile) // Get own profile
+    .put(
+        protect,
+        // Validation for updating own profile (e.g., name, phone, preferences)
+        [
+            body('firstName').optional().trim().isLength({ max: 50 }).withMessage('First name cannot exceed 50 characters.'),
+            body('lastName').optional().trim().isLength({ max: 50 }).withMessage('Last name cannot exceed 50 characters.'),
+            body('phone').optional().trim().isMobilePhone('any', { strictMode: false }).withMessage('Please provide a valid phone number.'),
+            body('avatar').optional().isURL().withMessage('Avatar must be a valid URL.'), // Assuming avatar is a URL
+            body('preferences').optional().isObject().withMessage('Preferences must be an object.'),
+            validateResult
+        ],
+        userController.updateUserProfile
+    );
 
-const userIdParamValidation = [
-    param('id').isMongoId().withMessage('Invalid user ID in URL.'),
-];
+// Routes for managing other users (requires higher privileges)
 
-const updateUserProfileValidation = [
-    body('name').optional().notEmpty().withMessage('Name cannot be empty.'),
-    body('phone').optional().notEmpty().withMessage('Phone number cannot be empty.'),
-    // Do NOT allow direct email or role changes here for security; handle separately
-];
+/**
+ * @route GET /api/users
+ * @desc Get all users with filtering and pagination
+ * @access Private (Admin, Landlord, Property Manager)
+ */
+router.get(
+    '/',
+    protect,
+    authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.LANDLORD, ROLE_ENUM.PROPERTY_MANAGER),
+    userController.getAllUsers
+);
 
-const updateUserValidation = [
-    param('id').isMongoId().withMessage('Invalid user ID.'),
-    body('name').optional().notEmpty().withMessage('Name cannot be empty.'),
-    body('phone').optional().notEmpty().withMessage('Phone number cannot be empty.'),
-    body('email').optional().isEmail().withMessage('Valid email is required.').normalizeEmail(), // Email change might require verification
-    body('role').optional().isIn(['tenant', 'landlord', 'admin', 'propertymanager', 'vendor']).withMessage('Invalid role provided.'),
-    body('isActive').optional().isBoolean().withMessage('isActive must be a boolean.'),
-    body('approved').optional().isBoolean().withMessage('approved must be a boolean.'),
-    // body('propertyAssociations').optional().isArray().withMessage('Property associations must be an array.'), // For complex updates
-];
-
-const updateUserRoleValidation = [
-    param('id').isMongoId().withMessage('Invalid user ID.'),
-    body('role').notEmpty().withMessage('Role is required.').isIn(['tenant', 'landlord', 'admin', 'propertymanager', 'vendor']).withMessage('Invalid role provided.'),
-];
-
-
-const createUserValidation = [
-    body('name').notEmpty().withMessage('Name is required.'),
-    body('email').isEmail().withMessage('Valid email is required.'),
-    body('role').notEmpty().isIn(['tenant', 'landlord', 'propertymanager', 'vendor', 'admin']).withMessage('Role is invalid'),
-    body('phone').optional().isString(),
-    body('propertyId').optional().isMongoId().withMessage('Invalid propertyId'),
-    body('unitId').optional().isMongoId().withMessage('Invalid unitId'),
-];
-
-
-
-// --- ROUTES ---
-
-// GET /api/users/me - Get current logged-in user's profile
-router.get('/me', protect, userController.getProfile); // This is `getProfile` from userController, not authController
-
-// PUT /api/users/me - Update current logged-in user's profile
-router.put('/me', protect, updateUserProfileValidation, userController.updateMyProfile);
-
-
-// GET /api/users - List all users (with filtering based on user role)
-router.get('/', protect, authorizeRoles('admin', 'landlord', 'propertymanager'), userController.listUsers);
-
-// Add this route after router.get('/', ...) and before router.get('/:id', ...)
+/**
+ * @route POST /api/users
+ * @desc Create a new user manually (Admin, Landlord, or PM can add tenants/vendors)
+ * @access Private (Admin, Landlord, Property Manager)
+ */
 router.post(
     '/',
     protect,
-    authorizeRoles('admin', 'landlord', 'propertymanager'),
-    createUserValidation,
+    authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.LANDLORD, ROLE_ENUM.PROPERTY_MANAGER),
+    [
+        body('firstName').notEmpty().withMessage('First name is required').trim().isLength({ max: 50 }),
+        body('lastName').notEmpty().withMessage('Last name is required').trim().isLength({ max: 50 }),
+        ...emailValidator, // Use shared email validation
+        body('phone').notEmpty().withMessage('Phone number is required').trim().isMobilePhone('any', { strictMode: false }),
+        body('role').notEmpty().withMessage('Role is required').isIn(Object.values(ROLE_ENUM)).withMessage(`Invalid role. Must be one of: ${Object.values(ROLE_ENUM).join(', ')}`),
+        body('propertyId').optional().isMongoId().withMessage('Invalid Property ID format.'),
+        body('unitId').optional().isMongoId().withMessage('Invalid Unit ID format.'),
+        validateResult
+    ],
     userController.createUser
 );
-// GET /api/users/:id - Get specific user details
-router.get('/:id', protect, userIdParamValidation, userController.getUserById);
 
-// PUT /api/users/:id - Update a user's profile (Admin only for full update, or limited by PM/Landlord)
-router.put('/:id', protect, authorizeRoles('admin', 'landlord', 'propertymanager'), updateUserValidation, userController.updateUser);
+/**
+ * @route GET /api/users/:id
+ * @desc Get specific user details by ID
+ * @access Private (Admin, Landlord, Property Manager - with access control)
+ */
+router.get(
+    '/:id',
+    protect,
+    validateMongoId('id'), // Validate ID in params
+    userController.getUserById
+);
 
-// DELETE /api/users/:id - Delete a user by ID
-router.delete('/:id', protect, authorizeRoles('admin','landlord', 'propertymanager'), userIdParamValidation, userController.deleteUser);
+/**
+ * @route PUT /api/users/:id
+ * @desc Update a user's profile by ID
+ * @access Private (Admin for full update; Landlord/PM for limited fields on associated users)
+ */
+router.put(
+    '/:id',
+    protect,
+    authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.LANDLORD, ROLE_ENUM.PROPERTY_MANAGER), // Only these roles can update other users
+    validateMongoId('id'), // Validate ID in params
+    // Add specific body validations for update here. Example:
+    [
+        body('firstName').optional().trim().isLength({ max: 50 }).withMessage('First name cannot exceed 50 characters.'),
+        body('lastName').optional().trim().isLength({ max: 50 }).withMessage('Last name cannot exceed 50 characters.'),
+        body('phone').optional().trim().isMobilePhone('any', { strictMode: false }).withMessage('Please provide a valid phone number.'),
+        body('avatar').optional().isURL().withMessage('Avatar must be a valid URL.'),
+        body('preferences').optional().isObject().withMessage('Preferences must be an object.'),
+        body('role').optional().isIn(Object.values(ROLE_ENUM)).withMessage(`Invalid role. Must be one of: ${Object.values(ROLE_ENUM).join(', ')}`),
+        body('status').optional().isIn(Object.values(REGISTRATION_STATUS_ENUM)).withMessage(`Invalid status. Must be one of: ${Object.values(REGISTRATION_STATUS_ENUM).join(', ')}`),
+        validateResult
+    ],
+    userController.updateUserById
+);
 
-// PATCH /api/users/:id/approve - Approve a user (if signup requires approval)
-router.patch('/:id/approve', protect, authorizeRoles('admin', 'landlord', 'propertymanager'), userIdParamValidation, userController.approveUser);
+/**
+ * @route DELETE /api/users/:id
+ * @desc Delete user by ID
+ * @access Private (Admin only)
+ */
+router.delete(
+    '/:id',
+    protect,
+    authorizeRoles(ROLE_ENUM.ADMIN), // Only global admin can delete users
+    validateMongoId('id'), // Validate ID in params
+    userController.deleteUserById
+);
 
-// PATCH /api/users/:id/role - Update a user's role (Admin only)
-router.patch('/:id/role', protect, authorizeRoles('admin'), updateUserRoleValidation, userController.updateUserRole);
+/**
+ * @route PUT /api/users/:id/approve
+ * @desc Approve a pending user
+ * @access Private (Admin, Landlord, Property Manager)
+ */
+router.put(
+    '/:id/approve',
+    protect,
+    authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.LANDLORD, ROLE_ENUM.PROPERTY_MANAGER),
+    validateMongoId('id'),
+    userController.approveUser
+);
+
+/**
+ * @route PUT /api/users/:id/role
+ * @desc Update a user's global role (Admin only)
+ * @access Private (Admin only)
+ */
+router.put(
+    '/:id/role',
+    protect,
+    authorizeRoles(ROLE_ENUM.ADMIN),
+    validateMongoId('id'),
+    [
+        body('role').notEmpty().withMessage('Role is required').isIn(Object.values(ROLE_ENUM)).withMessage(`Invalid role. Must be one of: ${Object.values(ROLE_ENUM).join(', ')}`),
+        validateResult
+    ],
+    userController.updateUserRole
+);
 
 
 module.exports = router;

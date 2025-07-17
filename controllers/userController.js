@@ -1,496 +1,734 @@
-// backend/controllers/userController.js
-const bcrypt = require('bcryptjs');
-const { sendEmail } = require('../utils/emailService'); // Correct utility
-const { generateResetToken } = require('../utils/token');
-const asyncHandler = require('express-async-handler'); // For handling async errors
-const User = require('../models/user'); // Corrected import: lowercase file name
-const PropertyUser = require('../models/propertyUser'); // Import PropertyUser model
-const Property = require('../models/property'); // For populating property details
+const asyncHandler = require('../utils/asyncHandler');
+const User = require('../models/user');
+const PropertyUser = require('../models/propertyUser');
+const Property = require('../models/property');
 const Request = require('../models/request');
+const ScheduledMaintenance = require('../models/scheduledMaintenance');
+const Notification = require('../models/notification');
+const Comment = require('../models/comment');
+const { createAuditLog } = require('../services/auditService');
+const emailService = require('../services/emailService');
+const notificationService = require('../services/notificationService');
+const { registerUser: authServiceRegisterUser } = require('../services/authService');
+const logger = require('../utils/logger');
+const AppError = require('../utils/AppError');
+const {
+    ROLE_ENUM, // Now an object
+    PROPERTY_USER_ROLES_ENUM,
+    REGISTRATION_STATUS_ENUM,
+    AUDIT_ACTION_ENUM, // Now an object
+    AUDIT_RESOURCE_TYPE_ENUM
+} = require('../utils/constants/enums');
+const crypto = require('crypto');
 
-// Helper for validation errors
-// This function assumes `express-validator` is used in the routes.
-const handleValidationErrors = (req, res) => {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-        return res.status(422).json({ errors: errors.array() });
-    }
-    return null; // No errors
-};
-
-/**
- * @desc    Get current logged-in user's profile
- * @route   GET /api/users/me (or /api/auth/profile, consolidated to authController)
- * @access  Private
- * @notes   This is already handled by authController.getMe. This endpoint can be for a more detailed user profile
- * that includes aggregated data from other models (like associated properties, units, etc.).
- */
-exports.getProfile = asyncHandler(async (req, res) => {
-    // req.user is set by the protect middleware.
-    // Populate user's associated properties and units through PropertyUser model
-    const userProfile = await User.findById(req.user._id).select('-passwordHash');
+const APP_NAME = process.env.APP_NAME || 'Fix It by Threalty';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+const getUserProfile = asyncHandler(async (req, res) => {
+    const userProfile = await User.findById(req.user._id)
+        .select('-passwordHash -resetPasswordToken -resetPasswordExpires -twoFactorSecret');
 
     if (!userProfile) {
-        res.status(404);
-        throw new Error('User profile not found.');
+        throw new AppError('User profile not found.', 404);
     }
 
-    // Fetch properties and units associated with this user via PropertyUser model
-    const associations = await PropertyUser.find({ user: userProfile._id })
-        .populate('property')
-        .populate('unit'); // Populate unit if relevant
+    const associations = await PropertyUser.find({ user: userProfile._id, isActive: true })
+        .populate('property', 'name address')
+        .populate('unit', 'unitName');
 
     const userAssociations = {
         propertiesManaged: [],
         propertiesOwned: [],
         tenancies: [],
-        // Add other roles as needed
+        vendorAssignments: [],
+        adminAccess: [],
     };
 
     associations.forEach(assoc => {
-        if (assoc.roles.includes('propertymanager') && assoc.property) {
+        if (assoc.roles.includes(PROPERTY_USER_ROLES_ENUM.PROPERTY_MANAGER) && assoc.property) {
             userAssociations.propertiesManaged.push(assoc.property);
         }
-        if (assoc.roles.includes('landlord') && assoc.property) {
+        if (assoc.roles.includes(PROPERTY_USER_ROLES_ENUM.LANDLORD) && assoc.property) {
             userAssociations.propertiesOwned.push(assoc.property);
         }
-        if (assoc.roles.includes('tenant') && assoc.property && assoc.unit) {
+        if (assoc.roles.includes(PROPERTY_USER_ROLES_ENUM.TENANT) && assoc.property && assoc.unit) {
             userAssociations.tenancies.push({ property: assoc.property, unit: assoc.unit });
         }
-        // If a vendor role is directly associated with a property, handle here
-        if (assoc.roles.includes('vendor') && assoc.property) {
-            // For vendors, you might want to show properties they are primary vendors for,
-            // distinct from individual request assignments.
+        if (assoc.roles.includes(PROPERTY_USER_ROLES_ENUM.VENDOR) && assoc.property) {
+            userAssociations.vendorAssignments.push(assoc.property);
+        }
+        if (assoc.roles.includes(PROPERTY_USER_ROLES_ENUM.ADMIN_ACCESS) && assoc.property) {
+            userAssociations.adminAccess.push(assoc.property);
         }
     });
 
+    await createAuditLog({
+        user: req.user._id,
+        action: AUDIT_ACTION_ENUM.FETCH_PROFILE,
+        description: `User ${userProfile.email} accessed their profile.`,
+        resourceType: AUDIT_RESOURCE_TYPE_ENUM.User,
+        resourceId: userProfile._id,
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent'],
+        status: 'success',
+    });
+
+    // --- Fix: map _id to id in the user object ---
+    const plainUser = userProfile.toObject();
+    plainUser.id = plainUser._id.toString(); // always as string for React
+    delete plainUser._id;
+    delete plainUser.__v;
+    plainUser.associations = userAssociations;
+
     res.status(200).json({
-        ...userProfile.toObject(), // Convert Mongoose document to plain object
-        associations: userAssociations, // Add aggregated associations
-        // Remove direct property/unit arrays from user model, now using associations
+        success: true,
+        user: plainUser
     });
 });
 
-/**
- * @desc    Update a user's own profile
- * @route   PUT /api/users/me
- * @access  Private
- * @notes   Allows users to update their name, phone, etc.
- */
-exports.updateMyProfile = asyncHandler(async (req, res) => {
-    // No validationResult check needed if using it as middleware in route
-    const { name, phone } = req.body; // Allow update of name and phone
 
+const updateUserProfile = asyncHandler(async (req, res) => {
     const user = await User.findById(req.user._id);
 
     if (!user) {
-        res.status(404);
-        throw new Error('User not found.');
+        throw new AppError('User not found.', 404);
     }
 
-    user.name = name || user.name;
-    user.phone = phone || user.phone;
-    // Do NOT allow direct role or email changes via this route for security
-    // Password changes are handled by resetPassword.
+    const oldUser = user.toObject();
+
+    user.firstName = req.body.firstName !== undefined ? req.body.firstName : user.firstName;
+    user.lastName = req.body.lastName !== undefined ? req.body.lastName : user.lastName;
+    user.phone = req.body.phone !== undefined ? req.body.phone : user.phone;
+    user.avatar = req.body.avatar !== undefined ? req.body.avatar : user.avatar;
+    if (req.body.preferences) {
+        user.preferences = { ...user.preferences, ...req.body.preferences };
+    }
 
     const updatedUser = await user.save();
+    logger.info(`UserController: User profile updated for ${updatedUser.email}`);
+
+    await createAuditLog({
+        action: AUDIT_ACTION_ENUM.UPDATE, // Correctly uses UPDATE
+        user: req.user._id,
+        resourceType: AUDIT_RESOURCE_TYPE_ENUM.User,
+        resourceId: updatedUser._id,
+        oldValue: { firstName: oldUser.firstName, lastName: oldUser.lastName, phone: oldUser.phone, avatar: oldUser.avatar, preferences: oldUser.preferences },
+        newValue: { firstName: updatedUser.firstName, lastName: updatedUser.lastName, phone: updatedUser.phone, avatar: updatedUser.avatar, preferences: updatedUser.preferences },
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent'],
+        description: `User ${updatedUser.email} updated their profile.`,
+        status: 'success'
+    });
 
     res.status(200).json({
-        _id: updatedUser._id,
-        name: updatedUser.name,
-        email: updatedUser.email,
-        phone: updatedUser.phone,
-        role: updatedUser.role, // Role remains unchanged by this route
+        success: true,
+        message: 'Profile updated successfully.',
+        user: {
+            _id: updatedUser._id,
+            firstName: updatedUser.firstName,
+            lastName: updatedUser.lastName,
+            email: updatedUser.email,
+            phone: updatedUser.phone,
+            role: updatedUser.role,
+            isEmailVerified: updatedUser.isEmailVerified,
+            status: updatedUser.status,
+            avatar: updatedUser.avatar,
+            preferences: updatedUser.preferences
+        }
     });
 });
 
-/**
- * @desc    List all users with filtering capabilities
- * @route   GET /api/users
- * @access  Private (Admin, PropertyManager, Landlord)
- * @notes   PMs/Landlords can only see users relevant to their properties.
- */
-exports.listUsers = asyncHandler(async (req, res) => {
-    // Admin can see all users
-    // PMs/Landlords can only see users associated with their properties/units
-    const { role, propertyId, unitId, search } = req.query;
-    const query = {};
+const getAllUsers = asyncHandler(async (req, res) => {
+    const { role, status, search, propertyId, unitId, page = 1, limit = 10 } = req.query;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    let userFilter = {};
+    let propertyUserFilter = {};
 
-    // Base query to fetch users, excluding passwordHash
-    let userQuery = User.find().select('-passwordHash');
+    if (req.user.role === ROLE_ENUM.ADMIN) {
+        // Admin can view all users
+    } else if ([ROLE_ENUM.LANDLORD, ROLE_ENUM.PROPERTY_MANAGER].includes(req.user.role)) {
+        const managedPropertyIds = await PropertyUser.find({
+            user: req.user._id,
+            isActive: true,
+            roles: { $in: [PROPERTY_USER_ROLES_ENUM.LANDLORD, PROPERTY_USER_ROLES_ENUM.PROPERTY_MANAGER, PROPERTY_USER_ROLES_ENUM.ADMIN_ACCESS] }
+        }).distinct('property');
 
+        if (managedPropertyIds.length === 0) {
+            return res.status(200).json({ success: true, count: 0, total: 0, page: parseInt(page), limit: parseInt(limit), data: [] });
+        }
+        propertyUserFilter.property = { $in: managedPropertyIds };
+    } else {
+        throw new AppError('Access denied: You do not have permission to view other users.', 403);
+    }
+
+    if (role) {
+        if (!Object.values(ROLE_ENUM).includes(role.toLowerCase())) {
+            throw new AppError(`Invalid role filter: ${role}`, 400);
+        }
+        userFilter.role = role.toLowerCase();
+    }
+    if (status) {
+        if (!Object.values(REGISTRATION_STATUS_ENUM).includes(status.toLowerCase())) {
+            throw new AppError(`Invalid status filter: ${status}`, 400);
+        }
+        userFilter.status = status.toLowerCase();
+    }
     if (search) {
-        query.$or = [
-            { name: { $regex: search, $options: 'i' } },
+        userFilter.$or = [
+            { firstName: { $regex: search, $options: 'i' } },
+            { lastName: { $regex: search, $options: 'i' } },
             { email: { $regex: search, $options: 'i' } },
             { phone: { $regex: search, $options: 'i' } },
         ];
     }
 
-    // Role-based filtering of users for Property Managers and Landlords
-    if (req.user.role === 'propertymanager' || req.user.role === 'landlord') {
-        const userAssociatedProperties = await PropertyUser.find({
-            user: req.user._id,
-            $or: [{ roles: 'propertymanager' }, { roles: 'landlord' }]
-        }).distinct('property'); // Get IDs of properties the current user manages/owns
-
-        // If the requesting user doesn't manage/own any properties, return empty
-        if (userAssociatedProperties.length === 0) {
-            return res.status(200).json([]);
+    if (propertyId) {
+        if (!propertyUserFilter.property) {
+            propertyUserFilter.property = propertyId;
+        } else {
+            // Ensure propertyId is within the already filtered managedPropertyIds
+            propertyUserFilter.property = { $in: propertyUserFilter.property.$in.filter(pId => pId.toString() === propertyId) };
+            if (propertyUserFilter.property.$in.length === 0) {
+                return res.status(200).json({ success: true, count: 0, total: 0, page: parseInt(page), limit: parseInt(limit), data: [] });
+            }
         }
-
-        // Find PropertyUser entries for users associated with these properties
-        const accessibleUserAssociations = await PropertyUser.find({
-            property: { $in: userAssociatedProperties },
-            // Optional: filter by specific roles if PM/Landlord only see tenants/vendors
-            // roles: { $in: ['tenant', 'vendor'] }
-        }).distinct('user'); // Get distinct user IDs from these associations
-
-        query._id = { $in: accessibleUserAssociations }; // Filter users by these IDs
+    }
+    if (unitId) {
+        propertyUserFilter.unit = unitId;
     }
 
-    if (role) {
-        query.role = role.toLowerCase(); // Filter by requested role
+    let usersToFetchIds = [];
+    if (Object.keys(propertyUserFilter).length > 0) {
+        usersToFetchIds = await PropertyUser.find(propertyUserFilter).distinct('user');
+        if (usersToFetchIds.length === 0) {
+            return res.status(200).json({ success: true, count: 0, total: 0, page: parseInt(page), limit: parseInt(limit), data: [] });
+        }
+        userFilter._id = { $in: usersToFetchIds };
     }
 
-    // Apply main query to User model
-    userQuery = userQuery.find(query);
+    const users = await User.find(userFilter)
+        .select('-passwordHash -resetPasswordToken -resetPasswordExpires -twoFactorSecret')
+        .sort({ createdAt: -1 })
+        .limit(parseInt(limit))
+        .skip(skip);
 
-    // If propertyId or unitId is provided, further filter by PropertyUser associations
-    if (propertyId || unitId) {
-        const specificPropertyUserQuery = { user: { $in: userQuery.map(u => u._id) } }; // Start with users already filtered
-        if (propertyId) specificPropertyUserQuery.property = propertyId;
-        if (unitId) specificPropertyUserQuery.unit = unitId;
+    const totalUsers = await User.countDocuments(userFilter);
 
-        const specificAssociatedUserIds = await PropertyUser.find(specificPropertyUserQuery).distinct('user');
-        userQuery = userQuery.find({ _id: { $in: specificAssociatedUserIds } });
-    }
+    await createAuditLog({
+        user: req.user._id,
+        action: AUDIT_ACTION_ENUM.FETCH_ALL_USERS, // Changed from READ_ALL
+        description: `User ${req.user.email} fetched list of users.`,
+        resourceType: AUDIT_RESOURCE_TYPE_ENUM.User,
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent'],
+        status: 'success',
+        metadata: { query: req.query }
+    });
 
-    const users = await userQuery.exec();
-
-    res.status(200).json(users);
+    res.status(200).json({
+        success: true,
+        count: users.length,
+        total: totalUsers,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        data: users
+    });
 });
 
-/**
- * @desc    Get specific user details by ID
- * @route   GET /api/users/:id
- * @access  Private (Admin, PropertyManager, Landlord - with access control)
- * @notes   Admin can get any user. PMs/Landlords can only get users they are associated with.
- */
-exports.getUserById = asyncHandler(async (req, res) => {
-    const userId = req.params.id;
+const getUserById = asyncHandler(async (req, res) => {
+    const { id } = req.params;
 
-    // Fetch user and exclude passwordHash
-    const user = await User.findById(userId).select('-passwordHash');
+    const user = await User.findById(id).select('-passwordHash -resetPasswordToken -resetPasswordExpires -twoFactorSecret');
 
     if (!user) {
-        res.status(404);
-        throw new Error('User not found.');
+        throw new AppError('User not found.', 404);
     }
 
-    // Authorization check: Admin can access any user
-    if (req.user.role === 'admin') {
-        // Fetch and include associations for admin view
-        const associations = await PropertyUser.find({ user: user._id })
-            .populate('property', 'name address')
-            .populate('unit', 'unitName property');
-        return res.status(200).json({ ...user.toObject(), associations });
-    }
-
-    // For PMs/Landlords, check if they are associated with this user through a property they manage/own
-    if (req.user.role === 'propertymanager' || req.user.role === 'landlord') {
-        const userAssociatedProperties = await PropertyUser.find({
+    if (req.user.role === ROLE_ENUM.ADMIN) {
+        // Admin has full access
+    } else if ([ROLE_ENUM.LANDLORD, ROLE_ENUM.PROPERTY_MANAGER].includes(req.user.role)) {
+        const managedPropertyIds = await PropertyUser.find({
             user: req.user._id,
-            $or: [{ roles: 'propertymanager' }, { roles: 'landlord' }]
+            isActive: true,
+            roles: { $in: [PROPERTY_USER_ROLES_ENUM.LANDLORD, PROPERTY_USER_ROLES_ENUM.PROPERTY_MANAGER, PROPERTY_USER_ROLES_ENUM.ADMIN_ACCESS] }
         }).distinct('property');
 
-        const isAssociated = await PropertyUser.exists({
-            user: userId,
-            property: { $in: userAssociatedProperties }
-        });
-
-        if (isAssociated) {
-            // Fetch and include associations for PM/Landlord view
-            const associations = await PropertyUser.find({ user: user._id })
-                .populate('property', 'name address')
-                .populate('unit', 'unitName property');
-            return res.status(200).json({ ...user.toObject(), associations });
-        } else {
-            res.status(403);
-            throw new Error('You are not authorized to view this user.');
+        if (managedPropertyIds.length === 0) {
+            throw new AppError('Access denied: You do not manage any properties.', 403);
         }
-    }
-
-    // Default: if user is not admin, PM, or Landlord, they can only view their own profile (handled by getMe)
-    // Or, if this route is restricted to admin/PM/Landlord only, this case might not be reachable.
-    res.status(403);
-    throw new Error('Not authorized to view this user profile.');
-});
-
-
-/**
- * @desc    Update a user's profile (Admin only for full update, or specific changes by PM/Landlord)
- * @route   PUT /api/users/:id
- * @access  Private (Admin, PropertyManager, Landlord - for limited fields)
- * @notes   This should allow admins to change roles, activate/deactivate users.
- * PMs/Landlords might update a tenant's name/phone if necessary.
- */
-exports.updateUser = asyncHandler(async (req, res) => {
-    // Implement validation for fields being updated
-    // if (handleValidationErrors(req, res)) return;
-
-    const userId = req.params.id;
-    const { name, phone, email, role, isActive, approved, propertyAssociations } = req.body;
-
-    const userToUpdate = await User.findById(userId).select('+passwordHash'); // Select passwordHash if needed for some logic
-
-    if (!userToUpdate) {
-        res.status(404);
-        throw new Error('User not found.');
-    }
-
-    // Admin can update anything except their own role to prevent lockout
-    if (req.user.role === 'admin') {
-        userToUpdate.name = name !== undefined ? name : userToUpdate.name;
-        userToUpdate.phone = phone !== undefined ? phone : userToUpdate.phone;
-        // userToUpdate.email = email !== undefined ? email : userToUpdate.email; // Email change might require verification
-        userToUpdate.isActive = isActive !== undefined ? isActive : userToUpdate.isActive;
-        userToUpdate.approved = approved !== undefined ? approved : userToUpdate.approved;
-
-        // Allow Admin to change role
-        if (role !== undefined && userToUpdate._id.toString() !== req.user._id.toString()) { // Prevent admin from changing their own role via this route
-            userToUpdate.role = role.toLowerCase();
-        }
-
-        // Handle updates to PropertyUser associations (complex, typically separate endpoint for adding/removing associations)
-        // For simplicity here, assume `propertyAssociations` is an array of { propertyId, unitId, roles }
-        // This is a placeholder for more complex logic.
-        if (propertyAssociations && Array.isArray(propertyAssociations)) {
-             // Logic to sync PropertyUser entries based on `propertyAssociations`
-             // This would involve finding existing PropertyUser entries for `userId`
-             // and updating/creating/deleting them based on `propertyAssociations` array.
-             // This can be complex and should likely be a dedicated helper function.
-             console.log(`Admin updating associations for user ${userId}:`, propertyAssociations);
-        }
-
-    } else if (req.user._id.toString() === userId) {
-        // Users can update their own name and phone
-        userToUpdate.name = name || userToUpdate.name;
-        userToUpdate.phone = phone || userToUpdate.phone;
-    } else {
-        // PMs/Landlords can update specific fields for users they manage/own,
-        // e.g., tenant's phone number or name, if they are associated with the user's property.
-        // Requires authorization check (similar to getUserById)
-        const userAssociatedProperties = await PropertyUser.find({
-            user: req.user._id,
-            $or: [{ roles: 'propertymanager' }, { roles: 'landlord' }]
-        }).distinct('property');
 
         const isAssociated = await PropertyUser.exists({
-            user: userId,
-            property: { $in: userAssociatedProperties }
+            user: id,
+            property: { $in: managedPropertyIds },
+            isActive: true
         });
 
         if (!isAssociated) {
-            res.status(403);
-            throw new Error('Not authorized to update this user profile.');
+            throw new AppError('Access denied: You do not have permission to view this user.', 403);
+        }
+    } else {
+        throw new AppError('Access denied: You do not have permission to view other user profiles.', 403);
+    }
+
+    const propertyAssociations = await PropertyUser.find({
+        user: user._id,
+        property: req.user.role === ROLE_ENUM.ADMIN ? { $exists: true } : { $in: await PropertyUser.find({ user: req.user._id }).distinct('property') },
+        isActive: true
+    })
+        .populate('property', 'name address')
+        .populate('unit', 'unitName');
+
+    await createAuditLog({
+        user: req.user._id,
+        action: AUDIT_ACTION_ENUM.READ_ONE_USER, // Changed from READ
+        description: `User ${req.user.email} fetched details for user ${user.email}.`,
+        resourceType: AUDIT_RESOURCE_TYPE_ENUM.User,
+        resourceId: user._id,
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent'],
+        status: 'success',
+    });
+
+    res.status(200).json({
+        success: true,
+        user: {
+            ...user.toObject(),
+            propertyAssociations
+        }
+    });
+});
+
+const createUser = asyncHandler(async (req, res) => {
+    const { firstName, lastName, email, phone, role, propertyId, unitId } = req.body;
+
+    if (![ROLE_ENUM.ADMIN, ROLE_ENUM.LANDLORD, ROLE_ENUM.PROPERTY_MANAGER].includes(req.user.role)) {
+        throw new AppError('Access denied: You do not have permission to create users.', 403);
+    }
+    if (role === ROLE_ENUM.TENANT && (!propertyId || !unitId)) {
+        throw new AppError('Property ID and Unit ID are required for creating a tenant.', 400);
+    }
+    if (role === ROLE_ENUM.VENDOR && !propertyId) {
+        throw new AppError('Property ID is required for creating a vendor.', 400);
+    }
+    if ([ROLE_ENUM.ADMIN, ROLE_ENUM.LANDLORD, ROLE_ENUM.PROPERTY_MANAGER].includes(role) && req.user.role !== ROLE_ENUM.ADMIN) {
+        throw new AppError('Only administrators can create other admin, landlord, or property manager accounts.', 403);
+    }
+
+    if (propertyId) {
+        const isAuthorizedProperty = await PropertyUser.exists({
+            user: req.user._id,
+            property: propertyId,
+            roles: { $in: [PROPERTY_USER_ROLES_ENUM.LANDLORD, PROPERTY_USER_ROLES_ENUM.PROPERTY_MANAGER, PROPERTY_USER_ROLES_ENUM.ADMIN_ACCESS] },
+            isActive: true
+        });
+        if (!isAuthorizedProperty && req.user.role !== ROLE_ENUM.ADMIN) {
+            throw new AppError('Not authorized to create a user for this property.', 403);
+        }
+    }
+
+    const tempPassword = crypto.randomBytes(8).toString('hex');
+    const newUser = await authServiceRegisterUser({
+        firstName,
+        lastName,
+        email,
+        phone,
+        password: tempPassword,
+        role,
+        status: REGISTRATION_STATUS_ENUM.PENDING_PASSWORD_SET
+    });
+
+    if (propertyId) {
+        // Ensure role is correctly mapped to PROPERTY_USER_ROLES_ENUM if it's a specific property role
+        let assignedPropertyRole = role.toLowerCase();
+        if (assignedPropertyRole === ROLE_ENUM.LANDLORD) assignedPropertyRole = PROPERTY_USER_ROLES_ENUM.LANDLORD;
+        else if (assignedPropertyRole === ROLE_ENUM.PROPERTY_MANAGER) assignedPropertyRole = PROPERTY_USER_ROLES_ENUM.PROPERTY_MANAGER;
+        else if (assignedPropertyRole === ROLE_ENUM.TENANT) assignedPropertyRole = PROPERTY_USER_ROLES_ENUM.TENANT;
+        else if (assignedPropertyRole === ROLE_ENUM.VENDOR) assignedPropertyRole = PROPERTY_USER_ROLES_ENUM.VENDOR_ACCESS; // Assuming vendor role maps to vendor_access
+
+        await PropertyUser.create({
+            user: newUser._id,
+            property: propertyId,
+            unit: unitId || null,
+            roles: [assignedPropertyRole], // Use the mapped role
+            invitedBy: req.user._id,
+            isActive: true,
+            startDate: new Date()
+        });
+        logger.info(`UserController: Created PropertyUser association for ${newUser.email} to property ${propertyId}.`);
+    }
+
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    newUser.resetPasswordToken = crypto.createHash('sha256').update(resetToken).digest('hex');
+    newUser.resetPasswordExpires = Date.now() + 3600000 * 24;
+    await newUser.save({ validateBeforeSave: false });
+
+    const setPasswordUrl = `${FRONTEND_URL}/reset-password/${resetToken}`;
+    try {
+        await emailService.sendInvitationEmail({
+            to: newUser.email,
+            inviteLink: setPasswordUrl,
+            role: newUser.role,
+            invitedByUserName: req.user.firstName || 'A user',
+            propertyDisplayName: propertyId || '', // Consider passing property name instead of ID for email
+        });
+        // Optionally, for future SMS/in-app: await notificationService.sendOnboardingNotification({ user: newUser, setPasswordUrl });
+    } catch (emailError) {
+        logger.error(`UserController: Failed to send onboarding set-password invitation to ${email}: ${emailError.message}`, emailError);
+    }
+
+    await createAuditLog({
+        user: req.user._id,
+        action: AUDIT_ACTION_ENUM.USER_CREATED, // Correctly uses USER_CREATED
+        description: `User ${req.user.email} manually created new user: ${newUser.email} with role: ${newUser.role}.`,
+        resourceType: AUDIT_RESOURCE_TYPE_ENUM.User,
+        resourceId: newUser._id,
+        newValue: { email: newUser.email, role: newUser.role, status: newUser.status, propertyId, unitId },
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent'],
+        status: 'success',
+    });
+
+    res.status(201).json({
+        success: true,
+        message: 'User created successfully. An email has been sent to set their password.',
+        user: {
+            _id: newUser._id,
+            firstName: newUser.firstName,
+            lastName: newUser.lastName,
+            email: newUser.email,
+            role: newUser.role,
+            status: newUser.status
+        }
+    });
+});
+
+const updateUserById = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { firstName, lastName, phone, avatar, preferences, role, status } = req.body;
+
+    const userToUpdate = await User.findById(id);
+    if (!userToUpdate) {
+        throw new AppError('User not found.', 404);
+    }
+
+    const oldUser = userToUpdate.toObject();
+
+    if (req.user.role === ROLE_ENUM.ADMIN) {
+        userToUpdate.firstName = firstName !== undefined ? firstName : userToUpdate.firstName;
+        userToUpdate.lastName = lastName !== undefined ? lastName : userToUpdate.lastName;
+        userToUpdate.phone = phone !== undefined ? phone : userToUpdate.phone;
+        userToUpdate.avatar = avatar !== undefined ? avatar : userToUpdate.avatar;
+        if (preferences) userToUpdate.preferences = { ...userToUpdate.preferences, ...preferences };
+
+        if (role !== undefined && role !== userToUpdate.role && !(userToUpdate._id.equals(req.user._id) && role !== ROLE_ENUM.ADMIN)) {
+            if (!Object.values(ROLE_ENUM).includes(role.toLowerCase())) {
+                throw new AppError(`Invalid role provided: ${role}`, 400);
+            }
+            userToUpdate.role = role.toLowerCase();
+        } else if (userToUpdate._id.equals(req.user._id) && role !== ROLE_ENUM.ADMIN) {
+            throw new AppError('Administrators cannot change their own global role to a non-admin role.', 403);
         }
 
-        // Allow PM/Landlord to update limited fields for associated users
-        userToUpdate.name = name || userToUpdate.name;
-        userToUpdate.phone = phone || userToUpdate.phone;
+        if (status !== undefined && status !== userToUpdate.status) {
+            if (!Object.values(REGISTRATION_STATUS_ENUM).includes(status.toLowerCase())) {
+                throw new AppError(`Invalid status provided: ${status}`, 400);
+            }
+            userToUpdate.status = status.toLowerCase();
+            userToUpdate.isActive = (status.toLowerCase() === REGISTRATION_STATUS_ENUM.ACTIVE);
+        }
+
+    } else if ([ROLE_ENUM.LANDLORD, ROLE_ENUM.PROPERTY_MANAGER].includes(req.user.role)) {
+        const managedPropertyIds = await PropertyUser.find({
+            user: req.user._id,
+            isActive: true,
+            roles: { $in: [PROPERTY_USER_ROLES_ENUM.LANDLORD, PROPERTY_USER_ROLES_ENUM.PROPERTY_MANAGER, PROPERTY_USER_ROLES_ENUM.ADMIN_ACCESS] }
+        }).distinct('property');
+
+        const isAssociated = await PropertyUser.exists({
+            user: id,
+            property: { $in: managedPropertyIds },
+            isActive: true
+        });
+
+        if (!isAssociated) {
+            throw new AppError('Access denied: You are not authorized to update this user.', 403);
+        }
+
+        // Prevent Landlord/PM from updating other management roles or their own account via this endpoint
+        if ([ROLE_ENUM.LANDLORD, ROLE_ENUM.PROPERTY_MANAGER, ROLE_ENUM.ADMIN].includes(userToUpdate.role) || userToUpdate._id.equals(req.user._id)) {
+            throw new AppError('Not authorized to update this user role or your own account via this endpoint.', 403);
+        }
+
+        userToUpdate.firstName = firstName !== undefined ? firstName : userToUpdate.firstName;
+        userToUpdate.lastName = lastName !== undefined ? lastName : userToUpdate.lastName;
+        userToUpdate.phone = phone !== undefined ? phone : userToUpdate.phone;
+        userToUpdate.avatar = avatar !== undefined ? avatar : userToUpdate.avatar;
+        if (preferences) userToUpdate.preferences = { ...userToUpdate.preferences, ...preferences };
+
+        if (status !== undefined && status !== userToUpdate.status) {
+            if (!Object.values(REGISTRATION_STATUS_ENUM).includes(status.toLowerCase())) {
+                throw new AppError(`Invalid status provided: ${status}`, 400);
+            }
+            userToUpdate.status = status.toLowerCase();
+            userToUpdate.isActive = (status.toLowerCase() === REGISTRATION_STATUS_ENUM.ACTIVE);
+
+            await PropertyUser.updateMany(
+                { user: id, property: { $in: managedPropertyIds } },
+                { $set: { isActive: userToUpdate.isActive, endDate: userToUpdate.isActive ? null : new Date() } }
+            );
+        }
+
+        if (role !== undefined && role !== userToUpdate.role) {
+            throw new AppError('Landlords/Property Managers cannot directly change global user roles.', 403);
+        }
+        if (req.body.email !== undefined && req.body.email !== userToUpdate.email) {
+            throw new AppError('Landlords/Property Managers cannot directly change user email addresses.', 403);
+        }
+
+    } else {
+        throw new AppError('Access denied: You do not have permission to update users.', 403);
     }
 
     const updatedUser = await userToUpdate.save();
+    logger.info(`UserController: User ${updatedUser.email} updated by ${req.user.email}.`);
+
+    await createAuditLog({
+        action: AUDIT_ACTION_ENUM.UPDATE, // Correctly uses UPDATE
+        user: req.user._id,
+        resourceType: AUDIT_RESOURCE_TYPE_ENUM.User,
+        resourceId: updatedUser._id,
+        oldValue: oldUser,
+        newValue: updatedUser.toObject(),
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent'],
+        description: `User ${updatedUser.email} updated by ${req.user.email}.`,
+        status: 'success'
+    });
 
     res.status(200).json({
-        _id: updatedUser._id,
-        name: updatedUser.name,
-        email: updatedUser.email,
-        phone: updatedUser.phone,
-        role: updatedUser.role,
-        isActive: updatedUser.isActive,
-        approved: updatedUser.approved,
+        success: true,
+        message: 'User updated successfully.',
+        user: {
+            _id: updatedUser._id,
+            firstName: updatedUser.firstName,
+            lastName: updatedUser.lastName,
+            email: updatedUser.email,
+            phone: updatedUser.phone,
+            role: updatedUser.role,
+            isEmailVerified: updatedUser.isEmailVerified,
+            status: updatedUser.status,
+            avatar: updatedUser.avatar,
+            preferences: updatedUser.preferences
+        }
     });
 });
 
+const deleteUserById = asyncHandler(async (req, res) => {
+    const { id } = req.params;
 
-/**
- * @desc    Delete a user by ID
- * @route   DELETE /api/users/:id
- * @access  Private (Admin only)
- * @notes   Also needs to clean up all related PropertyUser entries, requests, etc.
- */
-exports.deleteUser = asyncHandler(async (req, res) => {
-    const userId = req.params.id;
-
-    // Prevent deletion of self for safety, especially if it's the only admin
-    if (req.user._id.toString() === userId) {
-        res.status(400);
-        throw new Error('Cannot delete your own user account via this endpoint.');
+    if (req.user._id.toString() === id) {
+        throw new AppError('You cannot delete your own account via this endpoint.', 400);
     }
 
-    const deletedUser = await User.findByIdAndDelete(userId);
+    const userToDelete = await User.findById(id);
 
-    if (!deletedUser) {
-        res.status(404);
-        throw new Error('User not found.');
+    if (!userToDelete) {
+        throw new AppError('User not found.', 404);
     }
 
-    // --- Cleanup related data ---
-    // 1. Remove all PropertyUser associations for this user
-    await PropertyUser.deleteMany({ user: userId });
-    // 2. Update requests where this user was createdBy or assignedTo
-    // Set createdBy/assignedTo to null or a 'system' user, or delete related requests (careful with data loss)
-    // For now, let's just set to null, assuming referential integrity is not enforced by Mongoose on delete.
+    // Admins can delete users, but cannot delete other management roles (Admin, Landlord, PM)
+    if (req.user.role !== ROLE_ENUM.ADMIN || [ROLE_ENUM.ADMIN, ROLE_ENUM.LANDLORD, ROLE_ENUM.PROPERTY_MANAGER].includes(userToDelete.role)) {
+        throw new AppError('Access denied: Only administrators can delete users, and cannot delete other management roles.', 403);
+    }
+
+    await PropertyUser.deleteMany({ user: id });
+    logger.info(`UserController: Deleted PropertyUser associations for user ${userToDelete.email}.`);
+
+    // Set createdBy and assignedTo fields to null instead of deleting the entire request/scheduled maintenance
+    // This maintains historical data integrity while removing the user's direct link.
     await Request.updateMany(
-        { $or: [{ createdBy: userId }, { assignedTo: userId }] },
-        { $unset: { createdBy: 1, assignedTo: 1, assignedToModel: 1 } }
+        { $or: [{ createdBy: id }, { assignedTo: id }] },
+        { $unset: { createdBy: 1, assignedTo: 1, assignedToModel: 1 } } // Use $unset to remove the fields
     );
-    // 3. Update ScheduledMaintenance where createdBy or assignedTo
     await ScheduledMaintenance.updateMany(
-        { $or: [{ createdBy: userId }, { assignedTo: userId }] },
-        { $unset: { createdBy: 1, assignedTo: 1, assignedToModel: 1 } }
+        { $or: [{ createdBy: id }, { assignedTo: id }] },
+        { $unset: { createdBy: 1, assignedTo: 1, assignedToModel: 1 } } // Use $unset to remove the fields
     );
-    // 4. Delete notifications where recipient or sender
-    await Notification.deleteMany({ $or: [{ recipient: userId }, { sender: userId }] });
-    // 5. Delete comments where sender
-    await Comment.deleteMany({ sender: userId });
-    // 6. Update properties where this user was owner or manager (if not handled by PropertyUser)
-    // Note: If you removed landlord/propertyManager from Property, this is not needed.
-    // Ensure all references are handled.
+    logger.info(`UserController: Updated Request and ScheduledMaintenance references for user ${userToDelete.email}.`);
 
-    res.status(200).json({ message: 'User and associated data deleted successfully.' });
+    await Notification.deleteMany({ $or: [{ recipient: id }, { sender: id }] });
+    logger.info(`UserController: Deleted notifications for user ${userToDelete.email}.`);
+
+    await Comment.deleteMany({ sender: id });
+    logger.info(`UserController: Deleted comments by user ${userToDelete.email}.`);
+
+    await userToDelete.deleteOne();
+    logger.info(`UserController: User ${userToDelete.email} deleted by ${req.user.email}.`);
+
+    await createAuditLog({
+        action: AUDIT_ACTION_ENUM.DELETE, // Correctly uses DELETE
+        user: req.user._id,
+        resourceType: AUDIT_RESOURCE_TYPE_ENUM.User,
+        resourceId: userToDelete._id,
+        oldValue: userToDelete.toObject(),
+        newValue: null,
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent'],
+        description: `User ${userToDelete.email} deleted by ${req.user.email}.`,
+        status: 'success'
+    });
+
+    res.status(200).json({
+        success: true,
+        message: 'User and associated data deleted successfully.'
+    });
 });
 
-/**
- * @desc    Approve a user (if signup requires approval)
- * @route   PATCH /api/users/:id/approve
- * @access  Private (Admin only)
- * @notes   This endpoint is only relevant if User.approved defaults to `false` for non-invite signups.
- * Given our models, `approved` defaults to `true`, and invite acceptance handles this.
- * Keeping it for explicit admin control if needed.
- */
-exports.approveUser = asyncHandler(async (req, res) => {
-    const userId = req.params.id;
+const approveUser = asyncHandler(async (req, res) => {
+    const { id } = req.params;
 
-    const user = await User.findById(userId);
-    if (!user) {
-        res.status(404);
-        throw new Error("User not found.");
+    const userToApprove = await User.findById(id);
+    if (!userToApprove) {
+        throw new AppError('User not found.', 404);
     }
 
-    if (user.approved === true) {
-        return res.status(200).json({ message: "User already approved", user });
+    if (userToApprove.status === REGISTRATION_STATUS_ENUM.ACTIVE) {
+        throw new AppError('User is already active.', 400);
     }
 
-    user.approved = true;
-    await user.save();
+    if (req.user.role === ROLE_ENUM.ADMIN) {
+        // Admin can approve
+    } else if ([ROLE_ENUM.LANDLORD, ROLE_ENUM.PROPERTY_MANAGER].includes(req.user.role)) {
+        const managedPropertyIds = await PropertyUser.find({
+            user: req.user._id,
+            isActive: true,
+            roles: { $in: [PROPERTY_USER_ROLES_ENUM.LANDLORD, PROPERTY_USER_ROLES_ENUM.PROPERTY_MANAGER, PROPERTY_USER_ROLES_ENUM.ADMIN_ACCESS] }
+        }).distinct('property');
 
-    res.status(200).json({ message: "User approved successfully", user });
+        const isAssociated = await PropertyUser.exists({
+            user: id,
+            property: { $in: managedPropertyIds },
+            isActive: false, // Look for inactive associations to approve
+            roles: { $in: [PROPERTY_USER_ROLES_ENUM.TENANT, PROPERTY_USER_ROLES_ENUM.VENDOR_ACCESS] } // Corrected from VENDOR
+        });
+
+        if (!isAssociated) {
+            throw new AppError('Access denied: You are not authorized to approve this user or they are not a pending tenant/vendor for your properties.', 403);
+        }
+        // Landlords/PMs cannot approve other management roles
+        if ([ROLE_ENUM.LANDLORD, ROLE_ENUM.PROPERTY_MANAGER, ROLE_ENUM.ADMIN].includes(userToApprove.role)) {
+            throw new AppError('Not authorized to approve this user role.', 403);
+        }
+    } else {
+        throw new AppError('Access denied: You do not have permission to approve users.', 403);
+    }
+
+    const oldStatus = userToApprove.status;
+    const oldIsActive = userToApprove.isActive;
+
+    userToApprove.status = REGISTRATION_STATUS_ENUM.ACTIVE;
+    userToApprove.isActive = true;
+    const updatedUser = await userToApprove.save();
+
+    // Activate associated PropertyUser entries
+    await PropertyUser.updateMany(
+        { user: id, isActive: false },
+        { $set: { isActive: true, startDate: new Date(), endDate: null } } // Set endDate to null on activation
+    );
+
+    logger.info(`UserController: User ${updatedUser.email} approved by ${req.user.email}.`);
+
+    await createAuditLog({
+        action: AUDIT_ACTION_ENUM.USER_APPROVED, // Changed from APPROVAL
+        user: req.user._id,
+        resourceType: AUDIT_RESOURCE_TYPE_ENUM.User,
+        resourceId: updatedUser._id,
+        oldValue: { status: oldStatus, isActive: oldIsActive },
+        newValue: { status: updatedUser.status, isActive: updatedUser.isActive },
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent'],
+        description: `User ${updatedUser.email} approved by ${req.user.email}.`,
+        status: 'success'
+    });
+
+    // Optionally send notification: await notificationService.sendUserApprovedNotification(updatedUser);
+
+    res.status(200).json({
+        success: true,
+        message: 'User approved successfully.',
+        user: {
+            _id: updatedUser._id,
+            firstName: updatedUser.firstName,
+            lastName: updatedUser.lastName,
+            email: updatedUser.email,
+            role: updatedUser.role,
+            status: updatedUser.status,
+            isActive: updatedUser.isActive
+        }
+    });
 });
 
-/**
- * @desc    Update a user's role (Admin only)
- * @route   PATCH /api/users/:id/role
- * @access  Private (Admin only)
- */
-exports.updateUserRole = asyncHandler(async (req, res) => {
-    // Implement validation for new role
-    // if (handleValidationErrors(req, res)) return;
-
-    const userId = req.params.id;
+const updateUserRole = asyncHandler(async (req, res) => {
+    const { id } = req.params;
     const { role } = req.body;
 
-    if (!role || !['tenant', 'landlord', 'admin', 'propertymanager', 'vendor'].includes(role.toLowerCase())) {
-        res.status(400);
-        throw new Error('Invalid role provided.');
+    if (!Object.values(ROLE_ENUM).includes(role.toLowerCase())) {
+        throw new AppError('Invalid role provided.', 400);
     }
 
-    // Prevent admin from changing their own role to prevent lockout
-    if (req.user._id.toString() === userId && role.toLowerCase() !== 'admin') {
-        res.status(400);
-        throw new Error('Admins cannot change their own role to a non-admin role via this endpoint.');
+    const userToUpdate = await User.findById(id);
+    if (!userToUpdate) {
+        throw new AppError('User not found.', 404);
     }
 
-    const user = await User.findById(userId);
-    if (!user) {
-        res.status(404);
-        throw new Error('User not found.');
+    if (req.user.role !== ROLE_ENUM.ADMIN) {
+        throw new AppError('Access denied: Only administrators can update user roles.', 403);
     }
 
-    user.role = role.toLowerCase();
-    const updatedUser = await user.save();
+    if (userToUpdate._id.equals(req.user._id) && role.toLowerCase() !== ROLE_ENUM.ADMIN) {
+        throw new AppError('Administrators cannot change their own global role to a non-admin role via this endpoint.', 403);
+    }
+
+    const oldRole = userToUpdate.role;
+    userToUpdate.role = role.toLowerCase();
+    const updatedUser = await userToUpdate.save();
+
+    logger.info(`UserController: User ${updatedUser.email} global role changed from ${oldRole} to ${updatedUser.role} by ${req.user.email}.`);
+
+    await createAuditLog({
+        action: AUDIT_ACTION_ENUM.USER_ROLE_UPDATED, // Changed from UPDATE
+        user: req.user._id,
+        resourceType: AUDIT_RESOURCE_TYPE_ENUM.User,
+        resourceId: updatedUser._id,
+        oldValue: { role: oldRole },
+        newValue: { role: updatedUser.role },
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent'],
+        description: `User ${updatedUser.email} global role changed to ${updatedUser.role} by ${req.user.email}.`,
+        status: 'success'
+    });
 
     res.status(200).json({
-        _id: updatedUser._id,
-        name: updatedUser.name,
-        email: updatedUser.email,
-        role: updatedUser.role,
-        isActive: updatedUser.isActive,
+        success: true,
+        message: `User role updated to ${updatedUser.role}.`,
+        user: {
+            _id: updatedUser._id,
+            firstName: updatedUser.firstName,
+            lastName: updatedUser.lastName,
+            email: updatedUser.email,
+            role: updatedUser.role,
+            status: updatedUser.status
+        }
     });
 });
 
-
-/**
- * @desc    Create a new user (Admin, Landlord, or PM can manually add a tenant)
- * @route   POST /api/users
- * @access  Private (Admin, Landlord, PropertyManager)
- */
-
-exports.createUser = asyncHandler(async (req, res) => {
-    const { name, email, phone, role, propertyId, unitId } = req.body;
-
-    if (!name || !email || !role) {
-        res.status(400);
-        throw new Error("Name, email, and role are required.");
-    }
-
-    const existing = await User.findOne({ email: email.toLowerCase() });
-    if (existing) {
-        res.status(400);
-        throw new Error("A user with this email already exists.");
-    }
-
-    // Generate a set-password token
-    const resetToken = generateResetToken();
-    const resetPasswordExpires = Date.now() + 1000 * 60 * 60 * 24; // 24 hours
-
-    // --- FIX: Always set a temp passwordHash on creation ---
-    const randomTempPassword = Math.random().toString(36).slice(-8);
-    const tempPasswordHash = await bcrypt.hash(randomTempPassword, 10);
-
-    const user = await User.create({
-        name,
-        email: email.toLowerCase(),
-        phone,
-        role: role.toLowerCase(),
-        passwordHash: tempPasswordHash,          // <-- REQUIRED by your schema!
-        resetPasswordToken: resetToken,
-        resetPasswordExpires
-    });
-
-    if ((propertyId || unitId) && role.toLowerCase() === "tenant") {
-        await PropertyUser.create({
-            user: user._id,
-            property: propertyId,
-            unit: unitId,
-            roles: ['tenant'],
-            isActive: true,
-        });
-    }
-
-    // Send "Set Password" email
-    try {
-        const setPasswordUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/set-password?token=${resetToken}&email=${encodeURIComponent(email)}`;
-        await sendEmail({
-            to: email,
-            subject: "Set up your password for [Your Platform Name]",
-            text: `Hello ${name},\n\nAn account has been created for you on [Your Platform Name].\n\nPlease set your password using the following link (valid for 24 hours):\n\n${setPasswordUrl}\n\nIf you did not expect this, please ignore this email.\n\nThank you!`
-        });
-    } catch (err) {
-        console.error('Failed to send set-password email:', err.message);
-    }
-
-    res.status(201).json(user);
-});
+module.exports = {
+    getUserProfile,
+    updateUserProfile,
+    getAllUsers,
+    getUserById,
+    createUser,
+    updateUserById,
+    deleteUserById,
+    approveUser,
+    updateUserRole,
+};

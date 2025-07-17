@@ -1,276 +1,193 @@
-// backend/controllers/propertyController.js
+// src/controllers/propertyController.js
 
-const asyncHandler = require('express-async-handler');
-const { validationResult } = require('express-validator');
-const Property = require('../models/property'); // Corrected import: lowercase file name
-const User = require('../models/user');       // Corrected import
-const Unit = require('../models/unit');       // Corrected import
-const PropertyUser = require('../models/propertyUser'); // Corrected import
-const { createNotification } = require('./notificationController'); // Import internal notification helper
-
-// Helper for validation errors
-const handleValidationErrors = (req, res) => {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-        return res.status(422).json({ errors: errors.array() });
-    }
-    return null;
-};
+const asyncHandler = require('../utils/asyncHandler');
+const propertyService = require('../services/propertyService'); // Import the new property service
+const logger = require('../utils/logger');
+const AppError = require('../utils/AppError');
 
 /**
- * @desc    Create a new property
- * @route   POST /api/properties
- * @access  Private (Landlord, PropertyManager, Admin)
+ * @desc Create a new property
+ * @route POST /api/properties
+ * @access Private (Landlord, PropertyManager, Admin)
+ * @body {string} name - Name of the property
+ * @body {object} address - Address details {street, city, state, zipCode, country}
+ * @body {string} [propertyType='residential'] - Type of property (e.g., 'residential', 'commercial')
+ * @body {number} [yearBuilt] - Year the property was built
+ * @body {number} [numberOfUnits=0] - Total number of units in the property
+ * @body {string} [details] - Additional details about the property
+ * @body {number} [annualOperatingBudget=0] - Annual operating budget for the property
+ * @body {string} [notes] - Internal notes about the property
+ * @body {string} [mainContactUser] - ID of the user who is the main contact for this property
  */
-exports.createProperty = asyncHandler(async (req, res) => {
-    // if (handleValidationErrors(req, res)) return; // Assuming validation middleware is used in route
-    const { name, address, details } = req.body; // address will be an object { street, city, state, country }
+const createProperty = asyncHandler(async (req, res) => {
+    const propertyData = req.body;
+    const currentUser = req.user;
+    const ipAddress = req.ip;
 
-    if (!address || !address.city || !address.country) {
-        res.status(400);
-        throw new Error('Property address (city and country) is required.');
-    }
+    const newProperty = await propertyService.createProperty(propertyData, currentUser, ipAddress);
 
-    // Role-based authorization for creator (handled by route middleware)
-    // Only Landlords, PMs, and Admins can create properties.
-    if (!['landlord', 'propertymanager', 'admin'].includes(req.user.role)) {
-        res.status(403);
-        throw new Error('You are not authorized to create properties.');
-    }
-
-    const property = new Property({
-        name,
-        address,
-        details,
-        createdBy: req.user._id,
+    res.status(201).json({
+        success: true,
+        message: 'Property created successfully.',
+        data: newProperty
     });
-
-    const createdProperty = await property.save();
-
-    // After creating property, link the creator to it via PropertyUser model
-    // The creator becomes a 'landlord' if they are a landlord, or 'propertymanager' if they are a PM.
-    let roleForCreator = req.user.role;
-    if (roleForCreator === 'admin') { // Admins might not be the primary landlord/PM, but are linked
-        roleForCreator = 'propertymanager'; // Default admin to PM role on property for management access
-    }
-
-    await PropertyUser.create({
-        user: req.user._id,
-        property: createdProperty._id,
-        roles: [roleForCreator], // Assign initial role on this property
-        invitedBy: req.user._id, // Self-invited
-        isActive: true,
-    });
-
-    // Notify relevant parties if needed (e.g., admin if new property is created)
-    // createNotification(adminId, `New property ${createdProperty.name} created by ${req.user.email}`, 'property_added', `/properties/${createdProperty._id}`);
-
-    res.status(201).json(createdProperty);
-});
-
-
-/**
- * @desc    List properties (filtered by user role/association)
- * @route   GET /api/properties
- * @access  Private
- * @notes   Admin: all properties. Landlord/PM: properties they own/manage. Tenant: properties they tenant.
- */
-exports.listProperties = asyncHandler(async (req, res) => {
-    let query = {};
-    const userId = req.user._id;
-    const userRole = req.user.role;
-
-    if (userRole === 'admin') {
-        // Admin sees all properties, no additional filter needed
-    } else {
-        // For other roles, find properties associated with the current user via PropertyUser model
-        const associatedPropertyUsers = await PropertyUser.find({ user: userId });
-
-        if (associatedPropertyUsers.length === 0) {
-            return res.status(200).json([]); // User has no associated properties
-        }
-
-        const propertyIds = associatedPropertyUsers.map(pu => pu.property);
-        query._id = { $in: propertyIds };
-    }
-
-    // You can add more query parameters like search by name, city, etc.
-    const { search, city, country } = req.query;
-    if (search) {
-        query.name = { $regex: search, $options: 'i' };
-    }
-    if (city) {
-        query['address.city'] = { $regex: city, $options: 'i' };
-    }
-    if (country) {
-        query['address.country'] = { $regex: country, $options: 'i' };
-    }
-
-    // Populate units for each property
-    const properties = await Property.find(query).populate('units', 'unitName');
-    res.status(200).json(properties);
 });
 
 /**
- * @desc    Get specific property details (including units)
- * @route   GET /api/properties/:id
- * @access  Private (with access control)
+ * @desc Get all properties accessible by the logged-in user
+ * @route GET /api/properties
+ * @access Private (with access control)
+ * @query {string} [search] - Search by property name
+ * @query {string} [city] - Filter by city
+ * @query {string} [country] - Filter by country
+ * @query {boolean} [isActive] - Filter by active status
+ * @query {string} [propertyType] - Filter by property type
+ * @query {string} [sortBy='name'] - Field to sort by
+ * @query {string} [sortOrder='asc'] - Sort order ('asc' or 'desc')
+ * @query {number} [page=1] - Page number
+ * @query {number} [limit=10] - Items per page
  */
-exports.getPropertyDetails = asyncHandler(async (req, res) => {
-    const propertyId = req.params.id;
+const getAllProperties = asyncHandler(async (req, res) => {
+    const currentUser = req.user;
+    const filters = req.query;
 
-    const property = await Property.findById(propertyId)
-        .populate('units') // Populate units details
-        .populate('createdBy', 'name email'); // Populate who created the property
-
-    if (!property) {
-        res.status(404);
-        throw new Error('Property not found.');
-    }
-
-    // Authorization: Admin can view any property.
-    // Others must be associated with the property via PropertyUser.
-    if (req.user.role !== 'admin') {
-        const isAssociated = await PropertyUser.exists({
-            user: req.user._id,
-            property: propertyId,
-            isActive: true
-        });
-
-        if (!isAssociated) {
-            res.status(403);
-            throw new Error('Not authorized to view this property.');
-        }
-    }
-
-    // Optionally, fetch and include details about associated Landlords, PMs, Tenants via PropertyUser
-    const associatedUsers = await PropertyUser.find({ property: propertyId, isActive: true })
-        .populate('user', 'name email role'); // Populate user details
-
-    const landlords = associatedUsers.filter(au => au.roles.includes('landlord')).map(au => au.user);
-    const propertyManagers = associatedUsers.filter(au => au.roles.includes('propertymanager')).map(au => au.user);
-    const tenants = associatedUsers.filter(au => au.roles.includes('tenant')).map(au => ({ user: au.user, unit: au.unit })); // Include unit for tenants
+    const { properties, total, page, limit } = await propertyService.getAllProperties(currentUser, filters);
 
     res.status(200).json({
-        ...property.toObject(),
-        landlords,
-        propertyManagers,
-        tenants,
+        success: true,
+        count: properties.length,
+        total,
+        page,
+        limit,
+        data: properties
     });
 });
 
 /**
- * @desc    Update property details
- * @route   PUT /api/properties/:id
- * @access  Private (Landlord, PropertyManager - with ownership/management)
+ * @desc Get a single property by ID
+ * @route GET /api/properties/:id
+ * @access Private (Accessible if user is associated with property)
+ * @param {string} id - Property ID from URL params
  */
-exports.updateProperty = asyncHandler(async (req, res) => {
-    // if (handleValidationErrors(req, res)) return;
-    const propertyId = req.params.id;
-    const updateData = req.body;
+const getPropertyById = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const currentUser = req.user;
 
-    const property = await Property.findById(propertyId);
-    if (!property) {
-        res.status(404);
-        throw new Error('Property not found.');
-    }
+    const property = await propertyService.getPropertyById(id, currentUser);
 
-    // Authorization: Only Admin, or Landlord/PM associated with this property can update
-    let isAuthorized = false;
-    if (req.user.role === 'admin') {
-        isAuthorized = true;
-    } else {
-        const associatedRoles = await PropertyUser.find({
-            user: req.user._id,
-            property: propertyId,
-            isActive: true,
-            roles: { $in: ['landlord', 'propertymanager'] }
-        });
-        if (associatedRoles.length > 0) {
-            isAuthorized = true;
-        }
-    }
-
-    if (!isAuthorized) {
-        res.status(403);
-        throw new Error('Not authorized to update this property.');
-    }
-
-    // Apply updates to the property document
-    Object.assign(property, updateData);
-    const updatedProperty = await property.save();
-
-    res.status(200).json(updatedProperty);
+    res.status(200).json({
+        success: true,
+        data: property
+    });
 });
 
 /**
- * @desc    Delete property
- * @route   DELETE /api/properties/:id
- * @access  Private (Admin, Landlord - who owns it, with caution)
- * @notes   Very destructive. Requires careful handling of dependent data.
+ * @desc Update a property's details
+ * @route PUT /api/properties/:id
+ * @access Private (Landlord, PropertyManager - with ownership/management)
+ * @param {string} id - Property ID from URL params
+ * @body {string} [name] - New name of the property
+ * @body {object} [address] - New address details
+ * @body {string} [propertyType] - New type of property
+ * @body {number} [yearBuilt] - New year built
+ * @body {number} [numberOfUnits] - New total number of units
+ * @body {string} [details] - New additional details
+ * @body {number} [annualOperatingBudget] - New annual operating budget
+ * @body {string} [notes] - New internal notes
+ * @body {string} [mainContactUser] - New main contact user ID
+ * @body {boolean} [isActive] - New active status
  */
-exports.deleteProperty = asyncHandler(async (req, res) => {
-    const propertyId = req.params.id;
+const updateProperty = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const updateData = req.body;
+    const currentUser = req.user;
+    const ipAddress = req.ip;
 
-    const property = await Property.findById(propertyId);
-    if (!property) {
-        res.status(404);
-        throw new Error('Property not found.');
-    }
+    const updatedProperty = await propertyService.updateProperty(id, updateData, currentUser, ipAddress);
 
-    // Authorization: Only Admin can delete. Landlord could delete their own property, but consider the impact.
-    let isAuthorized = false;
-    if (req.user.role === 'admin') {
-        isAuthorized = true;
-    } else if (req.user.role === 'landlord') {
-        // Check if the current user is a landlord for this property (via PropertyUser)
-        const isLandlordOfProperty = await PropertyUser.exists({
-            user: req.user._id,
-            property: propertyId,
-            roles: 'landlord',
-            isActive: true
-        });
-        if (isLandlordOfProperty) {
-            isAuthorized = true;
-        }
-    }
-
-    if (!isAuthorized) {
-        res.status(403);
-        throw new Error('Not authorized to delete this property.');
-    }
-
-    // Check for existing units, requests, scheduled maintenance first
-    const hasUnits = await Unit.countDocuments({ property: propertyId });
-    const hasRequests = await Request.countDocuments({ property: propertyId });
-    const hasScheduledMaintenance = await ScheduledMaintenance.countDocuments({ property: propertyId });
-
-    if (hasUnits > 0 || hasRequests > 0 || hasScheduledMaintenance > 0) {
-        res.status(400);
-        throw new Error('Cannot delete property with associated units, requests, or scheduled maintenance. Please delete them first.');
-    }
-
-    await property.deleteOne(); // Use deleteOne() on the document instance
-
-    // --- Cleanup related data ---
-    // 1. Delete all PropertyUser associations for this property
-    await PropertyUser.deleteMany({ property: propertyId });
-    // 2. Delete all units belonging to this property (though checked above, good to have cascade logic if check was removed)
-    await Unit.deleteMany({ property: propertyId });
-    // 3. Delete all requests belonging to this property
-    await Request.deleteMany({ property: propertyId });
-    // 4. Delete all scheduled maintenance belonging to this property
-    await ScheduledMaintenance.deleteMany({ property: propertyId });
-    // 5. Delete all comments associated with this property (contextType: 'property')
-    await Comment.deleteMany({ contextId: propertyId, contextType: 'property' });
-    // 6. Delete all notifications related to this property
-    await Notification.deleteMany({ 'relatedResource.item': propertyId, 'relatedResource.kind': 'Property' });
-
-
-    res.status(200).json({ message: 'Property deleted successfully.' });
+    res.status(200).json({
+        success: true,
+        message: 'Property updated successfully.',
+        data: updatedProperty
+    });
 });
 
-// Removed `requestToJoin` and `approveTenant` from here.
-// These functionalities should be covered by the `Invite` model and `inviteController`
-// for controlled user onboarding and association with properties/units.
-// Direct tenant approval or joining should leverage the invitation system.
+/**
+ * @desc Delete a property (and all its associated data)
+ * @route DELETE /api/properties/:id
+ * @access Private (Admin, Landlord - who owns it)
+ * @param {string} id - Property ID from URL params
+ */
+const deleteProperty = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const currentUser = req.user;
+    const ipAddress = req.ip;
+
+    await propertyService.deleteProperty(id, currentUser, ipAddress);
+
+    res.status(200).json({
+        success: true,
+        message: 'Property and all associated data deleted successfully.'
+    });
+});
+
+/**
+ * @desc Assign a user to a property with specific roles
+ * @route POST /api/properties/:id/assign-user
+ * @access Private (Landlord, Admin)
+ * @param {string} id - Property ID from URL params
+ * @body {string} userIdToAssign - ID of the user to assign
+ * @body {Array<string>} roles - Array of roles (e.g., ['propertymanager'], ['tenant'])
+ * @body {string} [unitId] - Optional. Required if 'tenant' role is assigned.
+ */
+const assignUserToProperty = asyncHandler(async (req, res) => {
+    const { id: propertyId } = req.params;
+    const { userIdToAssign, roles, unitId } = req.body;
+    const currentUser = req.user;
+    const ipAddress = req.ip;
+
+    const assignment = await propertyService.assignUserToProperty(propertyId, userIdToAssign, roles, unitId, currentUser, ipAddress);
+
+    res.status(200).json({
+        success: true,
+        message: 'User assigned to property successfully.',
+        data: assignment
+    });
+});
+
+/**
+ * @desc Remove (deactivate) a user's association with a property/unit for specific roles
+ * @route DELETE /api/properties/:propertyId/remove-user/:userIdToRemove
+ * @access Private (Landlord, Admin)
+ * @param {string} propertyId - Property ID from URL params
+ * @param {string} userIdToRemove - User ID to remove from URL params
+ * @query {Array<string>} rolesToRemove - Array of roles to remove (e.g., ['propertymanager'], ['tenant'])
+ * @query {string} [unitId] - Optional. Required if 'tenant' role is being removed.
+ */
+const removeUserFromProperty = asyncHandler(async (req, res) => {
+    const { propertyId, userIdToRemove } = req.params;
+    const { rolesToRemove, unitId } = req.query; // Roles to remove are passed as query array
+    const currentUser = req.user;
+    const ipAddress = req.ip;
+
+    // Ensure rolesToRemove is an array, even if a single string is passed
+    const rolesArray = Array.isArray(rolesToRemove) ? rolesToRemove : (rolesToRemove ? [rolesToRemove] : []);
+
+    await propertyService.removeUserFromProperty(propertyId, userIdToRemove, rolesArray, unitId, currentUser, ipAddress);
+
+    res.status(200).json({
+        success: true,
+        message: 'User association removed successfully.'
+    });
+});
+
+
+module.exports = {
+    createProperty,
+    getAllProperties,
+    getPropertyById,
+    updateProperty,
+    deleteProperty,
+    assignUserToProperty,
+    removeUserFromProperty,
+};
