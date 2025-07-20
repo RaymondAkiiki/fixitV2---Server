@@ -1,4 +1,3 @@
-// server/models/rent.js
 const mongoose = require('mongoose');
 const { PAYMENT_STATUS_ENUM } = require('../utils/constants/enums');
 
@@ -8,9 +7,10 @@ const RentSchema = new mongoose.Schema({
         ref: 'Lease',
         required: true
     },
-    tenant: {
+    // Changed from direct User reference to PropertyUser reference
+    tenantPropertyUser: {
         type: mongoose.Schema.Types.ObjectId,
-        ref: 'User',
+        ref: 'PropertyUser',
         required: true
     },
     property: {
@@ -25,8 +25,7 @@ const RentSchema = new mongoose.Schema({
     },
     billingPeriod: {
         type: String,
-        // Removed `required: true` and added enum validation, it should derive from RentSchedule/Lease
-        // This might be redundant if the Rent document is generated from a RentSchedule
+        required: true
     },
     amountDue: {
         type: Number,
@@ -56,7 +55,7 @@ const RentSchema = new mongoose.Schema({
         type: String,
         trim: true
     },
-    paymentProof: { // Now referencing Media model directly for consistency
+    paymentProof: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Media',
         default: null
@@ -74,9 +73,34 @@ const RentSchema = new mongoose.Schema({
     timestamps: true
 });
 
+// Virtual to get tenant User directly
+RentSchema.virtual('tenant').get(async function() {
+    if (!this.populated('tenantPropertyUser')) {
+        await this.populate('tenantPropertyUser');
+    }
+    return this.tenantPropertyUser ? this.tenantPropertyUser.user : null;
+});
+
+// Utility method to calculate if rent is overdue
+RentSchema.methods.isOverdue = function() {
+    return this.status === 'due' && new Date() > this.dueDate;
+};
+
+// Method to calculate days overdue
+RentSchema.methods.daysOverdue = function() {
+    if (this.status !== 'due' || new Date() <= this.dueDate) {
+        return 0;
+    }
+    
+    const today = new Date();
+    const dueDate = new Date(this.dueDate);
+    const diffTime = Math.abs(today - dueDate);
+    return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+};
+
 // Indexes for efficient querying
 RentSchema.index({ lease: 1 });
-RentSchema.index({ tenant: 1 });
+RentSchema.index({ tenantPropertyUser: 1 });
 RentSchema.index({ property: 1 });
 RentSchema.index({ unit: 1 });
 RentSchema.index({ dueDate: 1, status: 1 });

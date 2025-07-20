@@ -1,25 +1,15 @@
 // src/controllers/leaseController.js
 
-const asyncHandler = require('../utils/asyncHandler'); // For handling async errors
-const leaseService = require('../services/leaseService'); // Import the new lease service
-const logger = require('../utils/logger'); // Import logger
-const AppError = require('../utils/AppError'); // Import custom AppError
+const asyncHandler = require('../utils/asyncHandler');
+const leaseService = require('../services/leaseService');
+const documentGenerationService = require('../services/documentGenerationService');
+const logger = require('../utils/logger');
+const AppError = require('../utils/AppError');
 
 /**
  * @desc Create a new lease agreement
  * @route POST /api/leases
- * @access Private (Landlord/Admin, or PM with 'manage_leases' permission)
- * @body {string} property - Property ID
- * @body {string} unit - Unit ID
- * @body {string} tenant - Tenant User ID
- * @body {Date} leaseStartDate - Start date of the lease
- * @body {Date} leaseEndDate - End date of the lease
- * @body {number} monthlyRent - Monthly rent amount
- * @body {string} currency - Currency of rent (e.g., 'UGX', 'USD')
- * @body {number} paymentDueDate - Day of the month rent is due (1-31)
- * @body {number} [securityDeposit=0] - Security deposit amount
- * @body {string} [terms] - Lease terms and conditions
- * @body {string} [status='active'] - Initial status of the lease
+ * @access Private (Landlord/Admin, Property Manager)
  */
 const createLease = asyncHandler(async (req, res) => {
     const leaseData = req.body;
@@ -39,34 +29,23 @@ const createLease = asyncHandler(async (req, res) => {
  * @desc Get all leases accessible by the logged-in user
  * @route GET /api/leases
  * @access Private (with access control)
- * @query {string} [status] - Filter by lease status
- * @query {string} [propertyId] - Filter by associated property ID
- * @query {string} [unitId] - Filter by associated unit ID
- * @query {string} [tenantId] - Filter by associated tenant ID
- * @query {Date} [startDate] - Filter by lease start date on or after this date
- * @query {Date} [endDate] - Filter by lease start date on or before this date
- * @query {Date} [expiryStartDate] - Filter by lease end date on or after this date
- * @query {Date} [expiryEndDate] - Filter by lease end date on or before this date
- * @query {string} [sortBy='leaseEndDate'] - Field to sort by
- * @query {string} [sortOrder='asc'] - Sort order ('asc' or 'desc')
- * @query {number} [page=1] - Page number
- * @query {number} [limit=10] - Items per page
  */
 const getAllLeases = asyncHandler(async (req, res) => {
     const currentUser = req.user;
     const filters = req.query;
-    const page = req.query.page || 1;
-    const limit = req.query.limit || 10;
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
 
-    const { leases, total, page: currentPage, limit: currentLimit } = await leaseService.getAllLeases(currentUser, filters, page, limit);
+    const result = await leaseService.getAllLeases(currentUser, filters, page, limit);
 
     res.status(200).json({
         success: true,
-        count: leases.length,
-        total,
-        page: currentPage,
-        limit: currentLimit,
-        data: leases
+        count: result.leases.length,
+        total: result.total,
+        page: result.page,
+        limit: result.limit,
+        pages: result.pages,
+        data: result.leases
     });
 });
 
@@ -74,7 +53,6 @@ const getAllLeases = asyncHandler(async (req, res) => {
  * @desc Get a single lease by ID
  * @route GET /api/leases/:id
  * @access Private (Accessible if user is associated with lease)
- * @param {string} id - Lease ID from URL params
  */
 const getLeaseById = asyncHandler(async (req, res) => {
     const { id } = req.params;
@@ -91,16 +69,7 @@ const getLeaseById = asyncHandler(async (req, res) => {
 /**
  * @desc Update a lease agreement
  * @route PUT /api/leases/:id
- * @access Private (Landlord/Admin, or PM with 'manage_leases' permission)
- * @param {string} id - Lease ID from URL params
- * @body {Date} [leaseStartDate] - New start date
- * @body {Date} [leaseEndDate] - New end date
- * @body {number} [monthlyRent] - New monthly rent
- * @body {string} [currency] - New currency
- * @body {number} [paymentDueDate] - New payment due day
- * @body {number} [securityDeposit] - New security deposit
- * @body {string} [terms] - New terms
- * @body {string} [status] - New status (e.g., 'active', 'pending_renewal', 'terminated', 'expired')
+ * @access Private (Landlord/Admin, Property Manager)
  */
 const updateLease = asyncHandler(async (req, res) => {
     const { id } = req.params;
@@ -120,8 +89,7 @@ const updateLease = asyncHandler(async (req, res) => {
 /**
  * @desc Delete a lease agreement
  * @route DELETE /api/leases/:id
- * @access Private (Landlord/Admin, or PM with 'manage_leases' permission)
- * @param {string} id - Lease ID from URL params
+ * @access Private (Landlord/Admin, Property Manager)
  */
 const deleteLease = asyncHandler(async (req, res) => {
     const { id } = req.params;
@@ -132,17 +100,14 @@ const deleteLease = asyncHandler(async (req, res) => {
 
     res.status(200).json({
         success: true,
-        message: 'Lease and associated rent records deleted successfully.'
+        message: 'Lease and associated records deleted successfully.'
     });
 });
 
 /**
- * @desc Get upcoming lease expiries for a landlord/PM/tenant
+ * @desc Get upcoming lease expiries
  * @route GET /api/leases/expiring
  * @access Private (Landlord/Admin, Property Manager, Tenant)
- * @query {string} [propertyId] - Filter by associated property ID
- * @query {string} [unitId] - Filter by associated unit ID
- * @query {number} [daysAhead=90] - Number of days into the future to look for expiring leases
  */
 const getExpiringLeases = asyncHandler(async (req, res) => {
     const currentUser = req.user;
@@ -160,8 +125,7 @@ const getExpiringLeases = asyncHandler(async (req, res) => {
 /**
  * @desc Mark a lease as renewal notice sent
  * @route PUT /api/leases/:id/mark-renewal-sent
- * @access Private (Landlord/Admin, or PM with 'manage_leases' permission)
- * @param {string} id - Lease ID from URL params
+ * @access Private (Landlord/Admin, Property Manager)
  */
 const markRenewalNoticeSent = asyncHandler(async (req, res) => {
     const { id } = req.params;
@@ -178,17 +142,19 @@ const markRenewalNoticeSent = asyncHandler(async (req, res) => {
 });
 
 /**
- * @desc Upload a lease document (e.g., signed agreement, amendment)
+ * @desc Upload a lease document
  * @route POST /api/leases/:id/documents
- * @access Private (Landlord/Admin, or PM with 'manage_leases' permission)
- * @param {string} id - Lease ID from URL params
- * @file {File} file - The file to upload (from multer middleware)
+ * @access Private (Landlord/Admin, Property Manager)
  */
 const uploadLeaseDocument = asyncHandler(async (req, res) => {
     const { id } = req.params;
-    const file = req.file; // From multer upload middleware
+    const file = req.file;
     const currentUser = req.user;
     const ipAddress = req.ip;
+
+    if (!file) {
+        throw new AppError('No file provided.', 400);
+    }
 
     const newMediaDoc = await leaseService.uploadLeaseDocument(id, file, currentUser, ipAddress);
 
@@ -202,9 +168,7 @@ const uploadLeaseDocument = asyncHandler(async (req, res) => {
 /**
  * @desc Download a lease document
  * @route GET /api/leases/:leaseId/documents/:documentId/download
- * @access Private (Landlord/Admin, PM, or Tenant associated with lease)
- * @param {string} leaseId - Lease ID from URL params
- * @param {string} documentId - Media Document ID from URL params
+ * @access Private (Landlord/Admin, Property Manager, or Tenant associated with lease)
  */
 const downloadLeaseDocument = asyncHandler(async (req, res) => {
     const { leaseId, documentId } = req.params;
@@ -223,11 +187,9 @@ const downloadLeaseDocument = asyncHandler(async (req, res) => {
 });
 
 /**
- * @desc Generate a lease-related document (e.g., renewal notice, exit letter)
+ * @desc Generate a lease document
  * @route POST /api/leases/:id/generate-document
- * @access Private (Landlord/Admin, or PM with 'manage_leases' permission)
- * @param {string} id - Lease ID from URL params
- * @body {string} documentType - Type of document to generate ('renewal_notice', 'exit_letter')
+ * @access Private (Landlord/Admin, Property Manager)
  */
 const generateLeaseDocument = asyncHandler(async (req, res) => {
     const { id } = req.params;
@@ -235,15 +197,115 @@ const generateLeaseDocument = asyncHandler(async (req, res) => {
     const currentUser = req.user;
     const ipAddress = req.ip;
 
+    if (!documentType) {
+        throw new AppError('Document type is required.', 400);
+    }
+
     const generatedMediaDoc = await leaseService.generateLeaseDocument(id, documentType, currentUser, ipAddress);
 
     res.status(200).json({
         success: true,
         message: `${documentType.replace('_', ' ')} generated and added to lease documents.`,
-        downloadUrl: generatedMediaDoc.url
+        data: generatedMediaDoc
     });
 });
 
+/**
+ * @desc Add an amendment to a lease
+ * @route POST /api/leases/:id/amendments
+ * @access Private (Landlord/Admin, Property Manager)
+ */
+const addLeaseAmendment = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const amendmentData = req.body;
+    const currentUser = req.user;
+    const ipAddress = req.ip;
+
+    if (!amendmentData.description) {
+        throw new AppError('Amendment description is required.', 400);
+    }
+
+    const updatedLease = await leaseService.addLeaseAmendment(id, amendmentData, currentUser, ipAddress);
+
+    res.status(200).json({
+        success: true,
+        message: 'Amendment added successfully.',
+        data: updatedLease
+    });
+});
+
+/**
+ * @desc Get rent report for a lease
+ * @route GET /api/leases/:id/rent-report
+ * @access Private (Landlord/Admin, Property Manager, Tenant)
+ */
+const getLeaseRentReport = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const params = req.query;
+    const currentUser = req.user;
+
+    const report = await leaseService.getLeaseRentReport(id, params, currentUser);
+
+    res.status(200).json({
+        success: true,
+        data: report
+    });
+});
+
+/**
+ * @desc Generate and download a rent report PDF
+ * @route POST /api/leases/:id/rent-report/generate
+ * @access Private (Landlord/Admin, Property Manager, Tenant)
+ */
+const generateRentReportDocument = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const params = req.body;
+    const currentUser = req.user;
+    const ipAddress = req.ip;
+
+    // First get the report data
+    const reportData = await leaseService.getLeaseRentReport(id, params, currentUser);
+    
+    // Prepare data for document generation
+    const documentData = {
+        startDate: reportData.startDate,
+        endDate: reportData.endDate,
+        propertyName: reportData.propertyName,
+        totalDue: reportData.totalDue,
+        totalCollected: reportData.totalPaid,
+        currency: reportData.currency,
+        statusSummary: reportData.statusSummary,
+        rentEntries: reportData.rentRecords.map(record => ({
+            unitName: reportData.unitName,
+            tenantName: reportData.tenantName,
+            dueDate: record.dueDate,
+            amountDue: record.amount,
+            amountPaid: record.amountPaid,
+            status: record.status
+        }))
+    };
+    
+    // Generate the document
+    const documentOptions = {
+        relatedResourceType: 'Lease',
+        relatedResourceId: id,
+        userId: currentUser._id,
+        ipAddress,
+        userName: `${currentUser.firstName} ${currentUser.lastName}`.trim()
+    };
+    
+    const mediaDoc = await documentGenerationService.generateAndUploadDocument(
+        'rent_report', 
+        documentData, 
+        documentOptions
+    );
+
+    res.status(200).json({
+        success: true,
+        message: 'Rent report generated successfully.',
+        data: mediaDoc
+    });
+});
 
 module.exports = {
     createLease,
@@ -256,4 +318,7 @@ module.exports = {
     uploadLeaseDocument,
     downloadLeaseDocument,
     generateLeaseDocument,
+    addLeaseAmendment,
+    getLeaseRentReport,
+    generateRentReportDocument
 };

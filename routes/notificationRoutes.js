@@ -2,13 +2,11 @@
 
 const express = require('express');
 const router = express.Router();
-const notificationController = require('../controllers/notificationController'); // Import controller
-const { protect } = require('../middleware/authMiddleware'); // Import auth middleware
-const { validateMongoId, validateResult } = require('../utils/validationUtils'); // Import validation utilities
-const { NOTIFICATION_TYPE_ENUM } = require('../utils/constants/enums'); // Import enums
-const { query, param } = require('express-validator'); // For specific query/param validation
-
-// Private routes (require authentication)
+const notificationController = require('../controllers/notificationController');
+const { protect, authorizeRoles } = require('../middleware/authMiddleware');
+const { validateMongoId, validateResult } = require('../utils/validationUtils');
+const { NOTIFICATION_TYPE_ENUM, ROLE_ENUM } = require('../utils/constants/enums');
+const { query, param, body } = require('express-validator');
 
 /**
  * @route GET /api/notifications
@@ -18,15 +16,67 @@ const { query, param } = require('express-validator'); // For specific query/par
 router.get(
     '/',
     protect,
-    // Authorization handled in service (user can only fetch their own)
     [
-        query('isRead').optional().isBoolean().withMessage('isRead must be a boolean (true/false).'),
+        query('readStatus').optional().isIn(['read', 'unread']).withMessage('readStatus must be "read" or "unread".'),
         query('type').optional().isIn(NOTIFICATION_TYPE_ENUM).withMessage(`Invalid notification type. Must be one of: ${NOTIFICATION_TYPE_ENUM.join(', ')}`),
+        query('startDate').optional().isISO8601().withMessage('startDate must be a valid ISO 8601 date.'),
+        query('endDate').optional().isISO8601().withMessage('endDate must be a valid ISO 8601 date.'),
         query('page').optional().isInt({ min: 1 }).withMessage('Page must be a positive integer.'),
         query('limit').optional().isInt({ min: 1 }).withMessage('Limit must be a positive integer.'),
         validateResult
     ],
     notificationController.getNotifications
+);
+
+/**
+ * @route GET /api/notifications/count
+ * @desc Get unread notification count for the logged-in user
+ * @access Private
+ */
+router.get(
+    '/count',
+    protect,
+    notificationController.getUnreadNotificationCount
+);
+
+/**
+ * @route GET /api/notifications/preferences
+ * @desc Get user notification preferences
+ * @access Private
+ */
+router.get(
+    '/preferences',
+    protect,
+    notificationController.getNotificationPreferences
+);
+
+/**
+ * @route PUT /api/notifications/preferences
+ * @desc Update user notification preferences
+ * @access Private
+ */
+router.put(
+    '/preferences',
+    protect,
+    [
+        body('channels').optional().isArray().withMessage('Channels must be an array.'),
+        body('channels.*').optional().isString().withMessage('Each channel must be a string.'),
+        body('emailSettings').optional().isObject().withMessage('Email settings must be an object.'),
+        body('smsSettings').optional().isObject().withMessage('SMS settings must be an object.'),
+        validateResult
+    ],
+    notificationController.updateNotificationPreferences
+);
+
+/**
+ * @route PATCH /api/notifications/mark-all-read
+ * @desc Mark all notifications as read for the logged-in user
+ * @access Private
+ */
+router.patch(
+    '/mark-all-read',
+    protect,
+    notificationController.markAllNotificationsAsRead
 );
 
 /**
@@ -51,17 +101,6 @@ router.patch(
     protect,
     validateMongoId('id'),
     notificationController.markNotificationAsRead
-);
-
-/**
- * @route PATCH /api/notifications/mark-all-read
- * @desc Mark all notifications as read for the logged-in user
- * @access Private (Recipient only)
- */
-router.patch(
-    '/mark-all-read',
-    protect,
-    notificationController.markAllNotificationsAsRead
 );
 
 /**

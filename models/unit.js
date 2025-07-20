@@ -1,4 +1,5 @@
-// server/models/unit.js
+// src/models/unit.js
+
 const mongoose = require('mongoose');
 const { UNIT_STATUS_ENUM, UTILITY_RESPONSIBILITY_ENUM } = require('../utils/constants/enums');
 
@@ -23,18 +24,45 @@ const unitSchema = new mongoose.Schema({
   property: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Property',
-    required: [true, 'Unit must belong to a property.']
+    required: [true, 'Unit must belong to a property.'],
+    index: true
   },
-  numBedrooms: { type: Number, min: [0, 'Number of bedrooms cannot be negative.'], default: null },
-  numBathrooms: { type: Number, min: [0, 'Number of bathrooms cannot be negative.'], default: null },
-  squareFootage: { type: Number, min: [0, 'Square footage cannot be negative.'], default: null },
-  rentAmount: { type: Number, min: [0, 'Rent amount cannot be negative.'], default: null },
-  depositAmount: { type: Number, min: [0, 'Deposit amount cannot be negative.'], default: null },
+  tenants: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: []
+  }],
+  numBedrooms: { 
+    type: Number, 
+    min: [0, 'Number of bedrooms cannot be negative.'], 
+    default: null 
+  },
+  numBathrooms: { 
+    type: Number, 
+    min: [0, 'Number of bathrooms cannot be negative.'], 
+    default: null 
+  },
+  squareFootage: { 
+    type: Number, 
+    min: [0, 'Square footage cannot be negative.'], 
+    default: null 
+  },
+  rentAmount: { 
+    type: Number, 
+    min: [0, 'Rent amount cannot be negative.'], 
+    default: null 
+  },
+  depositAmount: { 
+    type: Number, 
+    min: [0, 'Deposit amount cannot be negative.'], 
+    default: null 
+  },
   status: {
     type: String,
     enum: UNIT_STATUS_ENUM,
     default: 'vacant',
-    lowercase: true
+    lowercase: true,
+    index: true
   },
   utilityResponsibility: {
     type: String,
@@ -47,18 +75,54 @@ const unitSchema = new mongoose.Schema({
     maxlength: [2000, 'Notes cannot exceed 2000 characters.'],
     default: null
   },
-  lastInspected: { type: Date, default: null },
-  unitImages: [{ // Changed to reference Media model directly for consistency
+  lastInspected: { 
+    type: Date, 
+    default: null 
+  },
+  nextInspectionDate: {
+    type: Date,
+    default: null
+  },
+  unitImages: [{ 
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Media'
+  }],
+  isActive: {
+    type: Boolean,
+    default: true,
+    index: true
+  },
+  amenities: {
+    type: [String],
+    default: []
+  },
+  features: [{
+    name: String,
+    description: String
   }]
 }, {
-  timestamps: true
+  timestamps: true,
+  toJSON: { virtuals: true },
+  toObject: { virtuals: true }
+});
+
+// Virtual for occupancy status
+unitSchema.virtual('isOccupied').get(function() {
+  return this.tenants && this.tenants.length > 0;
+});
+
+// Virtual for calculating days since last inspection
+unitSchema.virtual('daysSinceLastInspection').get(function() {
+  if (!this.lastInspected) return null;
+  const now = new Date();
+  const diff = now - this.lastInspected;
+  return Math.floor(diff / (1000 * 60 * 60 * 24));
 });
 
 // Indexes
 unitSchema.index({ property: 1, unitName: 1 }, { unique: true });
-unitSchema.index({ status: 1 });
-unitSchema.index({ numBedrooms: 1 });
+unitSchema.index({ status: 1, property: 1 });
+unitSchema.index({ numBedrooms: 1, property: 1 });
+unitSchema.index({ 'tenants': 1 });
 
 module.exports = mongoose.models.Unit || mongoose.model('Unit', unitSchema);

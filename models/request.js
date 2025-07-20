@@ -1,46 +1,101 @@
-// server/models/request.js
+// src/models/request.js
+
 const mongoose = require('mongoose');
 const crypto = require('crypto');
-const { CATEGORY_ENUM, PRIORITY_ENUM, REQUEST_STATUS_ENUM, ASSIGNED_TO_MODEL_ENUM } = require('../utils/constants/enums');
-const feedbackSubSchema = require('./schemas/FeedbackSubSchema');
+const { 
+    CATEGORY_ENUM, 
+    PRIORITY_ENUM, 
+    REQUEST_STATUS_ENUM, 
+    ASSIGNED_TO_MODEL_ENUM 
+} = require('../utils/constants/enums');
+
+const feedbackSchema = new mongoose.Schema({
+    rating: {
+        type: Number,
+        min: 1,
+        max: 5,
+        required: [true, 'Rating is required']
+    },
+    comment: {
+        type: String,
+        trim: true,
+        maxlength: [1000, 'Comment cannot exceed 1000 characters']
+    },
+    submittedAt: {
+        type: Date,
+        default: Date.now
+    },
+    submittedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        required: [true, 'Submitter is required']
+    }
+}, { _id: false });
+
+const statusHistorySchema = new mongoose.Schema({
+    status: {
+        type: String,
+        enum: REQUEST_STATUS_ENUM,
+        required: [true, 'Status is required']
+    },
+    changedAt: {
+        type: Date,
+        default: Date.now
+    },
+    changedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User'
+    },
+    notes: {
+        type: String,
+        trim: true,
+        maxlength: [500, 'Notes cannot exceed 500 characters']
+    }
+}, { _id: false });
 
 const requestSchema = new mongoose.Schema({
     title: {
         type: String,
-        required: [true, 'Request title is required.'],
+        required: [true, 'Request title is required'],
         trim: true,
-        maxlength: [200, 'Title cannot exceed 200 characters.']
+        maxlength: [200, 'Title cannot exceed 200 characters']
     },
     description: {
         type: String,
-        required: [true, 'Description is required for the request.'],
-        maxlength: [2000, 'Description cannot exceed 2000 characters.'],
-        default: null
+        required: [true, 'Description is required for the request'],
+        trim: true,
+        maxlength: [2000, 'Description cannot exceed 2000 characters']
     },
     category: {
         type: String,
         enum: {
             values: CATEGORY_ENUM,
-            message: '"{VALUE}" is not a supported category.'
+            message: '"{VALUE}" is not a supported category'
         },
-        required: [true, 'Category is required.'],
+        required: [true, 'Category is required'],
         lowercase: true,
         index: true
     },
     priority: {
         type: String,
-        enum: PRIORITY_ENUM,
+        enum: {
+            values: PRIORITY_ENUM,
+            message: '"{VALUE}" is not a supported priority'
+        },
         default: 'low',
         lowercase: true,
         index: true
     },
-    media: [{ // Now referencing Media model directly for consistency
+    media: [{
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Media'
     }],
     status: {
         type: String,
-        enum: REQUEST_STATUS_ENUM,
+        enum: {
+            values: REQUEST_STATUS_ENUM,
+            message: '"{VALUE}" is not a valid status'
+        },
         default: 'new',
         index: true,
         lowercase: true
@@ -48,7 +103,7 @@ const requestSchema = new mongoose.Schema({
     property: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Property',
-        required: [true, 'Property is required for the request.'],
+        required: [true, 'Property is required for the request'],
         index: true
     },
     unit: {
@@ -58,10 +113,10 @@ const requestSchema = new mongoose.Schema({
         index: true,
         sparse: true
     },
-    createdBy: {
+    createdByPropertyUser: {
         type: mongoose.Schema.Types.ObjectId,
-        ref: 'User',
-        required: [true, 'Creator is required for the request.']
+        ref: 'PropertyUser',
+        required: [true, 'Creator PropertyUser is required for the request']
     },
     assignedTo: {
         type: mongoose.Schema.Types.ObjectId,
@@ -70,12 +125,15 @@ const requestSchema = new mongoose.Schema({
     },
     assignedToModel: {
         type: String,
-        enum: ASSIGNED_TO_MODEL_ENUM,
+        enum: {
+            values: ASSIGNED_TO_MODEL_ENUM,
+            message: '"{VALUE}" is not a valid assignee type'
+        },
         default: null
     },
-    assignedBy: {
+    assignedByPropertyUser: {
         type: mongoose.Schema.Types.ObjectId,
-        ref: 'User',
+        ref: 'PropertyUser',
         default: null
     },
     assignedAt: {
@@ -93,15 +151,20 @@ const requestSchema = new mongoose.Schema({
     },
     completedByModel: {
         type: String,
-        enum: ASSIGNED_TO_MODEL_ENUM, // Reusing ASSIGNED_TO_MODEL_ENUM for consistency
+        enum: {
+            values: ASSIGNED_TO_MODEL_ENUM,
+            message: '"{VALUE}" is not a valid completedBy type'
+        },
         default: null
     },
-    feedback: feedbackSubSchema,
-    generatedFromScheduledMaintenance: {
+    feedback: {
+        type: feedbackSchema,
+        default: null
+    },
+    comments: [{
         type: mongoose.Schema.Types.ObjectId,
-        ref: 'ScheduledMaintenance',
-        default: null
-    },
+        ref: 'Comment'
+    }],
     publicToken: {
         type: String,
         unique: true,
@@ -116,35 +179,113 @@ const requestSchema = new mongoose.Schema({
         type: Date,
         default: null
     },
-
+    statusHistory: [statusHistorySchema],
+    isActive: {
+        type: Boolean,
+        default: true,
+        index: true
+    }
 }, {
-    timestamps: true
+    timestamps: true,
+    toJSON: { virtuals: true },
+    toObject: { virtuals: true }
+});
+
+// Virtual field for createdBy User - to maintain compatibility
+requestSchema.virtual('createdBy').get(async function() {
+    if (!this.populated('createdByPropertyUser')) {
+        await this.populate({
+            path: 'createdByPropertyUser',
+            populate: {
+                path: 'user',
+                select: 'firstName lastName email role'
+            }
+        });
+    }
+    return this.createdByPropertyUser?.user || null;
+});
+
+// Virtual field for assignedBy User - to maintain compatibility
+requestSchema.virtual('assignedBy').get(async function() {
+    if (!this.populated('assignedByPropertyUser')) {
+        await this.populate({
+            path: 'assignedByPropertyUser',
+            populate: {
+                path: 'user',
+                select: 'firstName lastName email role'
+            }
+        });
+    }
+    return this.assignedByPropertyUser?.user || null;
 });
 
 /**
- * Instance method to enable a public link for the request.
- * Generates a public token if one doesn't exist.
- * @param {Date} [expiryDate=null] - Optional expiry date for the public link.
- * @returns {string} The public token.
+ * Method to update status and record in history
+ * @param {string} newStatus - New status
+ * @param {string} userId - ID of user making the change
+ * @param {string} [notes=''] - Optional notes
+ * @returns {Promise<Object>} Old and new status
  */
-requestSchema.methods.enablePublicLink = async function(expiryDate = null) {
+requestSchema.methods.updateStatus = async function(newStatus, userId, notes = '') {
+    const oldStatus = this.status;
+    
+    // Validate status
+    if (!REQUEST_STATUS_ENUM.includes(newStatus)) {
+        throw new Error(`Invalid status: ${newStatus}. Allowed values: ${REQUEST_STATUS_ENUM.join(', ')}`);
+    }
+    
+    this.status = newStatus;
+    
+    // Add to status history
+    this.statusHistory.push({
+        status: newStatus,
+        changedAt: new Date(),
+        changedBy: userId,
+        notes: notes
+    });
+    
+    // Set timestamps for specific status changes
+    if (newStatus === 'completed' && !this.resolvedAt) {
+        this.resolvedAt = new Date();
+    } else if (newStatus === 'reopened') {
+        this.resolvedAt = null;
+    }
+    
+    await this.save();
+    return { oldStatus, newStatus };
+};
+
+/**
+ * Method to enable public link
+ * @param {number} [expiresInDays=7] - Days until expiration
+ * @returns {Promise<string>} The public token
+ */
+requestSchema.methods.enablePublicLink = async function(expiresInDays = 7) {
     if (!this.publicToken) {
         this.publicToken = crypto.randomBytes(24).toString('hex');
     }
+    
     this.publicLinkEnabled = true;
-    if (expiryDate) {
-        this.publicLinkExpiresAt = expiryDate;
-    } else {
-        this.publicLinkExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-    }
+    this.publicLinkExpiresAt = new Date(Date.now() + (expiresInDays * 24 * 60 * 60 * 1000));
+    
     await this.save();
     return this.publicToken;
 };
 
+/**
+ * Method to disable public link
+ * @returns {Promise<void>}
+ */
+requestSchema.methods.disablePublicLink = async function() {
+    this.publicLinkEnabled = false;
+    await this.save();
+};
+
 // Indexes for common queries
-requestSchema.index({ property: 1, unit: 1, status: 1 });
-requestSchema.index({ createdBy: 1, status: 1 });
-requestSchema.index({ assignedTo: 1, status: 1 });
+requestSchema.index({ property: 1, unit: 1, status: 1, isActive: 1 });
+requestSchema.index({ createdByPropertyUser: 1, status: 1, isActive: 1 });
+requestSchema.index({ assignedTo: 1, assignedToModel: 1, status: 1, isActive: 1 });
 requestSchema.index({ createdAt: -1 });
+requestSchema.index({ publicToken: 1, publicLinkEnabled: 1, publicLinkExpiresAt: 1 });
 
 module.exports = mongoose.models.Request || mongoose.model('Request', requestSchema);

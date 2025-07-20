@@ -2,11 +2,19 @@
 
 const express = require('express');
 const router = express.Router();
-const reportController = require('../controllers/reportController'); // Import controller
-const { protect, authorizeRoles } = require('../middleware/authMiddleware'); // Import auth middleware
-const { validateMongoId, validateResult } = require('../utils/validationUtils'); // Import validation utilities
-const { ROLE_ENUM, REQUEST_STATUS_ENUM, SCHEDULED_MAINTENANCE_STATUS_ENUM, CATEGORY_ENUM, PRIORITY_ENUM, ASSIGNED_TO_MODEL_ENUM, PAYMENT_STATUS_ENUM, LEASE_STATUS_ENUM, SERVICE_ENUM } = require('../utils/constants/enums'); // Import enums
-const { query, body } = require('express-validator'); // For specific query/body validation
+const reportController = require('../controllers/reportController');
+const { protect, authorizeRoles } = require('../middleware/authMiddleware');
+const { validateMongoId, validateResult } = require('../utils/validationUtils');
+const { 
+    ROLE_ENUM, 
+    REQUEST_STATUS_ENUM, 
+    SCHEDULED_MAINTENANCE_STATUS_ENUM, 
+    CATEGORY_ENUM, 
+    ASSIGNED_TO_MODEL_ENUM, 
+    PAYMENT_STATUS_ENUM, 
+    LEASE_STATUS_ENUM 
+} = require('../utils/constants/enums');
+const { query, body } = require('express-validator');
 
 // Middleware for common date validation
 const dateRangeValidators = [
@@ -19,9 +27,6 @@ const dateRangeValidators = [
         return true;
     }),
 ];
-
-// Private routes (require authentication)
-// All report generation and export routes require Admin, PropertyManager, or Landlord roles.
 
 /**
  * @route GET /api/reports/maintenance-summary
@@ -56,7 +61,7 @@ router.get(
     [
         query('propertyId').optional().isMongoId().withMessage('Invalid Property ID format.'),
         query('vendorId').optional().isMongoId().withMessage('Invalid Vendor ID format.'),
-        ...dateRangeValidators, // Using resolvedAt for this report
+        ...dateRangeValidators,
         validateResult
     ],
     reportController.getVendorPerformanceReport
@@ -73,7 +78,7 @@ router.get(
     authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.PROPERTY_MANAGER, ROLE_ENUM.LANDLORD),
     [
         query('propertyId').optional().isMongoId().withMessage('Invalid Property ID format.'),
-        ...dateRangeValidators, // Using createdAt for this report
+        ...dateRangeValidators,
         validateResult
     ],
     reportController.getCommonIssuesReport
@@ -94,7 +99,7 @@ router.get(
         query('status').optional().isIn(PAYMENT_STATUS_ENUM).withMessage(`Invalid payment status filter. Must be one of: ${PAYMENT_STATUS_ENUM.join(', ')}`),
         query('tenantId').optional().isMongoId().withMessage('Invalid Tenant ID format.'),
         query('billingPeriod').optional().matches(/^\d{4}-\d{2}$/).withMessage('Billing period must be in YYYY-MM format.'),
-        ...dateRangeValidators, // Using dueDate for this report
+        ...dateRangeValidators,
         validateResult
     ],
     reportController.getRentCollectionReport
@@ -128,6 +133,27 @@ router.get(
 );
 
 /**
+ * @route POST /api/reports/document
+ * @desc Generate a document from a report
+ * @access Private (Admin, PropertyManager, Landlord)
+ */
+router.post(
+    '/document',
+    protect,
+    authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.PROPERTY_MANAGER, ROLE_ENUM.LANDLORD),
+    [
+        body('reportType')
+            .notEmpty().withMessage('Report type is required.')
+            .isIn(['maintenance_summary', 'vendor_performance', 'common_issues', 'rent_collection', 'lease_expiry'])
+            .withMessage('Invalid report type.'),
+        body('filters').optional().isObject().withMessage('Filters must be an object.'),
+        body('options').optional().isObject().withMessage('Options must be an object.'),
+        validateResult
+    ],
+    reportController.generateReportDocument
+);
+
+/**
  * @route GET /api/reports/export
  * @desc Export a report as a PDF or CSV.
  * @access Private (Admin, PropertyManager, Landlord)
@@ -137,13 +163,18 @@ router.get(
     protect,
     authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.PROPERTY_MANAGER, ROLE_ENUM.LANDLORD),
     [
-        query('type').notEmpty().withMessage('Report type is required.').isIn(['maintenance_summary', 'vendor_performance', 'common_issues', 'rent_collection', 'lease_expiry']).withMessage('Invalid report type.'),
-        query('format').notEmpty().withMessage('Export format is required.').isIn(['csv', 'pdf']).withMessage('Invalid export format. Must be "csv" or "pdf".'),
+        query('type')
+            .notEmpty().withMessage('Report type is required.')
+            .isIn(['maintenance_summary', 'vendor_performance', 'common_issues', 'rent_collection', 'lease_expiry'])
+            .withMessage('Invalid report type.'),
+        query('format')
+            .notEmpty().withMessage('Export format is required.')
+            .isIn(['csv', 'pdf']).withMessage('Invalid export format. Must be "csv" or "pdf".'),
         query('propertyId').optional().isMongoId().withMessage('Invalid Property ID format.'),
-        query('status').optional().isString().trim().withMessage('Status filter must be a string.'), // Generic, specific validation handled by service
+        query('status').optional().isString().trim().withMessage('Status filter must be a string.'),
         query('category').optional().isString().trim().withMessage('Category filter must be a string.'),
         query('assignedToId').optional().isMongoId().withMessage('Invalid Assigned To ID format.'),
-        query('assignedToModel').optional().isIn(ASSIGNED_TO_MODEL_ENUM).withMessage(`Invalid Assigned To Type. Must be one of: ${ASSIGNED_TO_MODEL_ENUM.join(', ')}`),
+        query('assignedToModel').optional().isIn(ASSIGNED_TO_MODEL_ENUM).withMessage(`Invalid Assigned To Type.`),
         query('vendorId').optional().isMongoId().withMessage('Invalid Vendor ID format.'),
         query('unitId').optional().isMongoId().withMessage('Invalid Unit ID format.'),
         query('tenantId').optional().isMongoId().withMessage('Invalid Tenant ID format.'),
@@ -152,22 +183,9 @@ router.get(
         query('endDate').optional().isISO8601().toDate().withMessage('End date must be a valid ISO 8601 date (YYYY-MM-DD).'),
         query('expiryStartDate').optional().isISO8601().toDate().withMessage('Expiry start date must be a valid ISO 8601 date (YYYY-MM-DD).'),
         query('expiryEndDate').optional().isISO8601().toDate().withMessage('Expiry end date must be a valid ISO 8601 date (YYYY-MM-DD).'),
-        query('startDate').optional().custom((startDate, { req }) => {
-            if (req.query.endDate && new Date(startDate) > new Date(req.query.endDate)) {
-                throw new Error('Start date cannot be after end date.');
-            }
-            return true;
-        }),
-        query('expiryStartDate').optional().custom((startDate, { req }) => {
-            if (req.query.expiryEndDate && new Date(startDate) > new Date(req.query.expiryEndDate)) {
-                throw new Error('Expiry start date cannot be after expiry end date.');
-            }
-            return true;
-        }),
         validateResult
     ],
     reportController.exportReport
 );
-
 
 module.exports = router;

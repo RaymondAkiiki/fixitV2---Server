@@ -1,76 +1,156 @@
+// src/routes/authRoutes.js
+
 const express = require('express');
 const router = express.Router();
 const authController = require('../controllers/authController');
 const { protect } = require('../middleware/authMiddleware');
-const {
-    validateUserRegistration,
-    emailValidator,
-    passwordValidator,
-    validateResult
+const { 
+    emailValidator, 
+    passwordValidator, 
+    validateResult 
 } = require('../utils/validationUtils');
-const { body } = require('express-validator');
-const asyncHandler = require('../utils/asyncHandler'); // Import asyncHandler
+const { body, param } = require('express-validator');
 
-// @route   POST /api/auth/register
-// @desc    Register a new user
-// @access  Public
-router.post('/register', validateUserRegistration, asyncHandler(authController.registerUser));
+/**
+ * @route POST /api/auth/register
+ * @desc Register a new user
+ * @access Public
+ */
+router.post(
+    '/register',
+    [
+        body('firstName').notEmpty().withMessage('First name is required').trim(),
+        body('lastName').notEmpty().withMessage('Last name is required').trim(),
+        ...emailValidator,
+        body('phone').notEmpty().withMessage('Phone number is required').trim(),
+        ...passwordValidator,
+        body('role').optional().isIn(['user', 'tenant', 'vendor']).withMessage('Invalid role'),
+        validateResult
+    ],
+    authController.registerUser
+);
 
-// @route   POST /api/auth/login
-// @desc    Authenticate user & get token
-// @access  Public
+/**
+ * @route POST /api/auth/login
+ * @desc Log in and get auth token
+ * @access Public
+ */
 router.post(
     '/login',
     [
         ...emailValidator,
-        body('password', 'Password is required').notEmpty(),
-        validateResult,
+        body('password').notEmpty().withMessage('Password is required'),
+        validateResult
     ],
-    asyncHandler(authController.loginUser) // Wrap controller in asyncHandler
+    authController.loginUser
 );
 
-// @route   POST /api/auth/logout
-// @desc    Logout user
-// @access  Private
-router.post('/logout', protect, asyncHandler(authController.logoutUser));
+/**
+ * @route GET /api/auth/me
+ * @desc Get current user profile
+ * @access Private
+ */
+router.get('/me', protect, authController.getMe);
 
-// @route   GET /api/auth/me
-// @desc    Get current user's profile from token
-// @access  Private
-router.get('/me', protect, asyncHandler(authController.getMe));
+/**
+ * @route POST /api/auth/google
+ * @desc Authenticate with Google
+ * @access Public
+ */
+router.post(
+    '/google',
+    [
+        body('idToken').notEmpty().withMessage('Google ID token is required'),
+        validateResult
+    ],
+    authController.loginWithGoogle
+);
 
-// @route   POST /api/auth/forgot-password
-// @desc    Request password reset link
-// @access  Public
-router.post('/forgot-password', [emailValidator, validateResult], asyncHandler(authController.forgotPassword));
+/**
+ * @route POST /api/auth/logout
+ * @desc Logout user
+ * @access Private
+ */
+router.post('/logout', protect, authController.logoutUser);
 
-// @route   PUT /api/auth/reset-password/:token
-// @desc    Reset password using token
-// @access  Public
-router.put('/reset-password/:token', [passwordValidator, validateResult], asyncHandler(authController.resetPassword));
-
-// @route   GET /api/auth/verify-email/:token
-// @desc    Verify user's email address
-// @access  Public
-router.get('/verify-email/:token', asyncHandler(authController.verifyEmail));
-
-// @route   POST /api/auth/send-verification-email
-// @desc    Resend email verification link
-// @access  Private
-router.post('/send-verification-email', protect, asyncHandler(authController.sendVerificationEmail));
-
-// @route   PUT /api/auth/change-password
-// @desc    Change authenticated user's password
-// @access  Private
+/**
+ * @route PUT /api/auth/change-password
+ * @desc Change password (authenticated users)
+ * @access Private
+ */
 router.put(
     '/change-password',
     protect,
     [
-        body('currentPassword', 'Current password is required').notEmpty(),
-        body('newPassword', 'New password is required').isLength({ min: 8 }).withMessage('Password must be at least 8 characters long'),
+        body('currentPassword').notEmpty().withMessage('Current password is required'),
+        body('newPassword').notEmpty().withMessage('New password is required')
+            .isLength({ min: 8 }).withMessage('Password must be at least 8 characters long')
+            .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]+$/)
+            .withMessage('Password must contain at least one uppercase letter, one lowercase letter, one number, and one special character.'),
         validateResult
     ],
-    asyncHandler(authController.changePassword)
+    authController.changePassword
+);
+
+/**
+ * @route POST /api/auth/forgot-password
+ * @desc Request password reset email
+ * @access Public
+ */
+router.post(
+    '/forgot-password',
+    [
+        ...emailValidator,
+        validateResult
+    ],
+    authController.forgotPassword
+);
+
+/**
+ * @route PUT /api/auth/reset-password/:token
+ * @desc Reset password with token
+ * @access Public
+ */
+router.put(
+    '/reset-password/:token',
+    [
+        param('token').notEmpty().withMessage('Token is required'),
+        body('newPassword').notEmpty().withMessage('New password is required')
+            .isLength({ min: 8 }).withMessage('Password must be at least 8 characters long')
+            .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]+$/)
+            .withMessage('Password must contain at least one uppercase letter, one lowercase letter, one number, and one special character.'),
+        validateResult
+    ],
+    authController.resetPassword
+);
+
+/**
+ * @route GET /api/auth/verify-email/:token
+ * @desc Verify email with token
+ * @access Public
+ */
+router.get(
+    '/verify-email/:token',
+    [
+        param('token').notEmpty().withMessage('Token is required'),
+        validateResult
+    ],
+    authController.verifyEmail
+);
+
+/**
+ * @route POST /api/auth/send-verification-email
+ * @desc Send verification email (works for both logged in and logged out users)
+ * @access Public/Private
+ */
+router.post(
+    '/send-verification-email',
+    [
+        body('email').optional().isEmail().withMessage('Valid email is required if not logged in'),
+        validateResult
+    ],
+    // No protect middleware - handles both authenticated and unauthenticated requests
+    authController.sendVerificationEmail
 );
 
 module.exports = router;

@@ -1,38 +1,34 @@
 // src/controllers/onboardingController.js
 
 const asyncHandler = require('../utils/asyncHandler');
-const onboardingService = require('../services/onboardingService'); // Import the new onboarding service
+const onboardingService = require('../services/onboardingService');
 const logger = require('../utils/logger');
 const AppError = require('../utils/AppError');
 
 /**
- * @desc Upload and create a new onboarding document
+ * @desc Create a new onboarding document
  * @route POST /api/onboarding
- * @access Private (Landlord/Admin, or PM with 'manage_onboarding' permission)
- * @body {string} title - Title of the document
- * @body {string} [description] - Description of the document
- * @body {string} category - Category of the document (e.g., 'SOP', 'Training')
- * @body {string} visibility - Visibility setting ('all_tenants', 'property_tenants', 'unit_tenants', 'specific_tenant')
- * @body {string} [propertyId] - Optional. Required for 'property_tenants' or 'unit_tenants' visibility.
- * @body {string} [unitId] - Optional. Required for 'unit_tenants' visibility.
- * @body {string} [tenantId] - Optional. Required for 'specific_tenant' visibility.
- * @file file - The actual file to upload (handled by upload middleware)
+ * @access Private (Landlord/Admin, PropertyManager)
  */
 const createOnboardingDocument = asyncHandler(async (req, res) => {
-    // req.file is populated by upload middleware (e.g., uploadSingleDocument)
     if (!req.file) {
         throw new AppError('No file uploaded.', 400);
     }
 
-    const documentData = req.body; // Contains title, description, category, propertyId, unitId, tenantId, visibility
+    const documentData = req.body;
     const currentUser = req.user;
     const ipAddress = req.ip;
 
-    const newDocument = await onboardingService.createOnboardingDocument(req.file, documentData, currentUser, ipAddress);
+    const newDocument = await onboardingService.createOnboardingDocument(
+        req.file, 
+        documentData, 
+        currentUser, 
+        ipAddress
+    );
 
     res.status(201).json({
         success: true,
-        message: 'Onboarding document uploaded successfully.',
+        message: 'Onboarding document created successfully.',
         data: newDocument
     });
 });
@@ -40,26 +36,23 @@ const createOnboardingDocument = asyncHandler(async (req, res) => {
 /**
  * @desc Get all onboarding documents accessible by the logged-in user
  * @route GET /api/onboarding
- * @access Private
- * @query {string} [category] - Filter by category
- * @query {string} [propertyId] - Filter by property ID
- * @query {string} [unitId] - Filter by unit ID
- * @query {number} [page=1] - Page number
- * @query {number} [limit=10] - Items per page
+ * @access Private (with access control)
  */
 const getOnboardingDocuments = asyncHandler(async (req, res) => {
     const currentUser = req.user;
     const filters = req.query;
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
 
-    const { documents, total, page, limit } = await onboardingService.getOnboardingDocuments(currentUser, filters);
+    const result = await onboardingService.getOnboardingDocuments(currentUser, filters, page, limit);
 
     res.status(200).json({
         success: true,
-        count: documents.length,
-        total,
-        page,
-        limit,
-        data: documents
+        count: result.documents.length,
+        total: result.total,
+        page: result.page,
+        limit: result.limit,
+        data: result.documents
     });
 });
 
@@ -67,7 +60,6 @@ const getOnboardingDocuments = asyncHandler(async (req, res) => {
  * @desc Get a single onboarding document by ID
  * @route GET /api/onboarding/:id
  * @access Private (Accessible if user is authorized)
- * @param {string} id - Document ID from URL params
  */
 const getOnboardingDocumentById = asyncHandler(async (req, res) => {
     const { id } = req.params;
@@ -84,16 +76,7 @@ const getOnboardingDocumentById = asyncHandler(async (req, res) => {
 /**
  * @desc Update an onboarding document
  * @route PUT /api/onboarding/:id
- * @access Private (Landlord/Admin, or PM with 'manage_onboarding' permission)
- * @param {string} id - Document ID from URL params
- * @body {string} [title] - New title
- * @body {string} [description] - New description
- * @body {string} [category] - New category
- * @body {string} [visibility] - New visibility setting
- * @body {string} [propertyId] - New property ID
- * @body {string} [unitId] - New unit ID
- * @body {string} [tenantId] - New tenant ID
- * // Note: File updates are typically handled via a separate upload endpoint
+ * @access Private (Landlord/Admin, PropertyManager)
  */
 const updateOnboardingDocument = asyncHandler(async (req, res) => {
     const { id } = req.params;
@@ -101,7 +84,12 @@ const updateOnboardingDocument = asyncHandler(async (req, res) => {
     const currentUser = req.user;
     const ipAddress = req.ip;
 
-    const updatedDocument = await onboardingService.updateOnboardingDocument(id, updateData, currentUser, ipAddress);
+    const updatedDocument = await onboardingService.updateOnboardingDocument(
+        id, 
+        updateData, 
+        currentUser, 
+        ipAddress
+    );
 
     res.status(200).json({
         success: true,
@@ -113,8 +101,7 @@ const updateOnboardingDocument = asyncHandler(async (req, res) => {
 /**
  * @desc Delete an onboarding document
  * @route DELETE /api/onboarding/:id
- * @access Private (Landlord/Admin, or PM with 'manage_onboarding' permission)
- * @param {string} id - Document ID from URL params
+ * @access Private (Landlord/Admin, PropertyManager)
  */
 const deleteOnboardingDocument = asyncHandler(async (req, res) => {
     const { id } = req.params;
@@ -133,7 +120,6 @@ const deleteOnboardingDocument = asyncHandler(async (req, res) => {
  * @desc Mark an onboarding document as completed by a tenant
  * @route PATCH /api/onboarding/:id/complete
  * @access Private (Tenant only)
- * @param {string} id - Document ID from URL params
  */
 const markOnboardingCompleted = asyncHandler(async (req, res) => {
     const { id } = req.params;
@@ -144,31 +130,33 @@ const markOnboardingCompleted = asyncHandler(async (req, res) => {
 
     res.status(200).json({
         success: true,
-        message: updatedDocument.isCompleted ? 'Document marked as completed successfully.' : 'Document is already marked as completed.',
+        message: 'Document marked as completed successfully.',
         data: updatedDocument
     });
 });
 
 /**
- * @desc Get download URL for an onboarding document
+ * @desc Get download info for an onboarding document
  * @route GET /api/onboarding/:id/download
  * @access Private (Accessible if user is authorized to view)
- * @param {string} id - Document ID from URL params
  */
 const getOnboardingDocumentDownloadUrl = asyncHandler(async (req, res) => {
     const { id } = req.params;
     const currentUser = req.user;
     const ipAddress = req.ip;
 
-    const { downloadUrl, fileName } = await onboardingService.getOnboardingDocumentDownloadUrl(id, currentUser, ipAddress);
+    const { downloadUrl, fileName, mimeType } = await onboardingService.getOnboardingDocumentDownloadUrl(
+        id, 
+        currentUser, 
+        ipAddress
+    );
 
-    // In a real application, you might redirect or set headers for file download
-    // For now, we return the URL for the frontend to handle.
     res.status(200).json({
         success: true,
-        message: 'Download URL generated.',
+        message: 'Download URL generated successfully.',
         downloadUrl,
-        fileName
+        fileName,
+        mimeType
     });
 });
 
@@ -179,5 +167,5 @@ module.exports = {
     updateOnboardingDocument,
     deleteOnboardingDocument,
     markOnboardingCompleted,
-    getOnboardingDocumentDownloadUrl,
+    getOnboardingDocumentDownloadUrl
 };

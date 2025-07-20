@@ -2,26 +2,105 @@
 
 const express = require('express');
 const router = express.Router();
-const leaseController = require('../controllers/leaseController'); // Import controller
-const { protect, authorizeRoles } = require('../middleware/authMiddleware'); // Import auth middleware
-const { upload } = require('../middleware/uploadMiddleware'); // For single file uploads
-const { validateMongoId, validateResult } = require('../utils/validationUtils'); // Import validation utilities
-const { ROLE_ENUM, LEASE_STATUS_ENUM } = require('../utils/constants/enums'); // Import enums
-const { body, query, param } = require('express-validator'); // For specific body/query/param validation
+const leaseController = require('../controllers/leaseController');
+const { protect, authorizeRoles } = require('../middleware/authMiddleware');
+const { upload } = require('../middleware/uploadMiddleware');
+const { validateMongoId, validateResult } = require('../utils/validationUtils');
+const { ROLE_ENUM, LEASE_STATUS_ENUM } = require('../utils/constants/enums');
+const { body, query, param } = require('express-validator');
 
-// Middleware for common date validation
-const dateRangeValidators = [
-    query('startDate').optional().isISO8601().toDate().withMessage('Start date must be a valid ISO 8601 date (YYYY-MM-DD).'),
-    query('endDate').optional().isISO8601().toDate().withMessage('End date must be a valid ISO 8601 date (YYYY-MM-DD).'),
-    query('startDate').optional().custom((startDate, { req }) => {
-        if (req.query.endDate && new Date(startDate) > new Date(req.query.endDate)) {
-            throw new Error('Start date cannot be after end date.');
-        }
-        return true;
-    }),
+/**
+ * Lease validation middleware for common fields
+ */
+const validateLeaseData = [
+    body('leaseStartDate')
+        .optional()
+        .isISO8601().toDate().withMessage('Lease start date must be a valid date.'),
+    
+    body('leaseEndDate')
+        .optional()
+        .isISO8601().toDate().withMessage('Lease end date must be a valid date.'),
+    
+    body('leaseEndDate')
+        .optional()
+        .custom((endDate, { req }) => {
+            if (req.body.leaseStartDate && new Date(endDate) <= new Date(req.body.leaseStartDate)) {
+                throw new Error('Lease end date must be after lease start date.');
+            }
+            return true;
+        }),
+    
+    body('monthlyRent')
+        .optional()
+        .isFloat({ min: 0 }).withMessage('Monthly rent must be a non-negative number.'),
+    
+    body('currency')
+        .optional()
+        .isString().trim()
+        .isLength({ max: 10 }).withMessage('Currency cannot exceed 10 characters.'),
+    
+    body('paymentDueDate')
+        .optional()
+        .isInt({ min: 1, max: 31 }).withMessage('Payment due date must be a day of the month (1-31).'),
+    
+    body('securityDeposit')
+        .optional()
+        .isFloat({ min: 0 }).withMessage('Security deposit must be a non-negative number.'),
+    
+    body('terms')
+        .optional()
+        .isString().trim()
+        .isLength({ max: 2000 }).withMessage('Terms cannot exceed 2000 characters.'),
+    
+    body('status')
+        .optional()
+        .isIn(LEASE_STATUS_ENUM).withMessage(`Invalid status. Must be one of: ${LEASE_STATUS_ENUM.join(', ')}`),
+    
+    validateResult
 ];
 
-// Private routes (require authentication)
+/**
+ * Date range validation middleware
+ */
+const dateRangeValidators = [
+    query('startDate')
+        .optional()
+        .isISO8601().toDate().withMessage('Start date must be a valid ISO 8601 date (YYYY-MM-DD).'),
+    
+    query('endDate')
+        .optional()
+        .isISO8601().toDate().withMessage('End date must be a valid ISO 8601 date (YYYY-MM-DD).'),
+    
+    query('startDate')
+        .optional()
+        .custom((startDate, { req }) => {
+            if (req.query.endDate && new Date(startDate) > new Date(req.query.endDate)) {
+                throw new Error('Start date cannot be after end date.');
+            }
+            return true;
+        }),
+    
+    validateResult
+];
+
+// Routes that list or search all leases
+
+/**
+ * @route GET /api/leases/expiring
+ * @desc Get upcoming lease expiries
+ * @access Private (Landlord/Admin, Property Manager, Tenant)
+ */
+router.get(
+    '/expiring',
+    protect,
+    [
+        query('propertyId').optional().isMongoId().withMessage('Invalid Property ID format.'),
+        query('unitId').optional().isMongoId().withMessage('Invalid Unit ID format.'),
+        query('daysAhead').optional().isInt({ min: 1 }).withMessage('Days ahead must be a positive integer.'),
+        validateResult
+    ],
+    leaseController.getExpiringLeases
+);
 
 /**
  * @route POST /api/leases
@@ -63,7 +142,6 @@ router.post(
 router.get(
     '/',
     protect,
-    // Authorization handled in service
     [
         query('status').optional().isIn(LEASE_STATUS_ENUM).withMessage(`Invalid status filter. Must be one of: ${LEASE_STATUS_ENUM.join(', ')}`),
         query('propertyId').optional().isMongoId().withMessage('Invalid Property ID format.'),
@@ -88,11 +166,13 @@ router.get(
         query('sortBy').optional().isString().trim().withMessage('Sort by field must be a string.'),
         query('sortOrder').optional().isIn(['asc', 'desc']).withMessage('Sort order must be "asc" or "desc".'),
         query('page').optional().isInt({ min: 1 }).withMessage('Page must be a positive integer.'),
-        query('limit').optional().isInt({ min: 1 }).withMessage('Limit must be a positive integer.'),
+        query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('Limit must be between 1 and 100.'),
         validateResult
     ],
     leaseController.getAllLeases
 );
+
+// Routes for specific lease by ID
 
 /**
  * @route GET /api/leases/:id
@@ -116,23 +196,7 @@ router.put(
     protect,
     authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.LANDLORD, ROLE_ENUM.PROPERTY_MANAGER),
     validateMongoId('id'),
-    [
-        body('leaseStartDate').optional().isISO8601().toDate().withMessage('Lease start date must be a valid date.'),
-        body('leaseEndDate').optional().isISO8601().toDate().withMessage('Lease end date must be a valid date.'),
-        body('leaseEndDate').optional().custom((endDate, { req }) => {
-            if (req.body.leaseStartDate && new Date(endDate) <= new Date(req.body.leaseStartDate)) {
-                throw new Error('Lease end date must be after lease start date.');
-            }
-            return true;
-        }),
-        body('monthlyRent').optional().isFloat({ min: 0 }).withMessage('Monthly rent must be a non-negative number.'),
-        body('currency').optional().isString().trim().isLength({ max: 10 }).withMessage('Currency cannot exceed 10 characters.'),
-        body('paymentDueDate').optional().isInt({ min: 1, max: 31 }).withMessage('Payment due date must be a day of the month (1-31).'),
-        body('securityDeposit').optional().isFloat({ min: 0 }).withMessage('Security deposit must be a non-negative number.'),
-        body('terms').optional().isString().trim().isLength({ max: 2000 }).withMessage('Terms cannot exceed 2000 characters.'),
-        body('status').optional().isIn(LEASE_STATUS_ENUM).withMessage(`Invalid status. Must be one of: ${LEASE_STATUS_ENUM.join(', ')}`),
-        validateResult
-    ],
+    validateLeaseData,
     leaseController.updateLease
 );
 
@@ -147,24 +211,6 @@ router.delete(
     authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.LANDLORD, ROLE_ENUM.PROPERTY_MANAGER),
     validateMongoId('id'),
     leaseController.deleteLease
-);
-
-/**
- * @route GET /api/leases/expiring
- * @desc Get upcoming lease expiries
- * @access Private (Landlord/Admin, Property Manager, Tenant)
- */
-router.get(
-    '/expiring',
-    protect,
-    // Authorization handled in service
-    [
-        query('propertyId').optional().isMongoId().withMessage('Invalid Property ID format.'),
-        query('unitId').optional().isMongoId().withMessage('Invalid Unit ID format.'),
-        query('daysAhead').optional().isInt({ min: 1 }).withMessage('Days ahead must be a positive integer.'),
-        validateResult
-    ],
-    leaseController.getExpiringLeases
 );
 
 /**
@@ -184,7 +230,6 @@ router.put(
  * @route POST /api/leases/:id/documents
  * @desc Upload a lease document
  * @access Private (Landlord/Admin, PropertyManager)
- * @notes This route expects `multipart/form-data` with a field named `file`.
  */
 router.post(
     '/:id/documents',
@@ -192,8 +237,6 @@ router.post(
     authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.LANDLORD, ROLE_ENUM.PROPERTY_MANAGER),
     validateMongoId('id'),
     upload.single('documentFile'),
-    // No specific body validation here as the file itself is the primary payload
-    validateResult,
     leaseController.uploadLeaseDocument
 );
 
@@ -212,7 +255,7 @@ router.get(
 
 /**
  * @route POST /api/leases/:id/generate-document
- * @desc Generate a lease-related document (e.g., renewal notice, exit letter)
+ * @desc Generate a lease-related document
  * @access Private (Landlord/Admin, PropertyManager)
  */
 router.post(
@@ -221,10 +264,72 @@ router.post(
     authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.LANDLORD, ROLE_ENUM.PROPERTY_MANAGER),
     validateMongoId('id'),
     [
-        body('documentType').notEmpty().withMessage('Document type is required.').isIn(['renewal_notice', 'exit_letter']).withMessage('Document type must be "renewal_notice" or "exit_letter".'),
+        body('documentType')
+            .notEmpty().withMessage('Document type is required.')
+            .isIn(['renewal_notice', 'exit_letter', 'termination_notice', 'lease_notice'])
+            .withMessage('Document type must be one of: renewal_notice, exit_letter, termination_notice, lease_notice'),
         validateResult
     ],
     leaseController.generateLeaseDocument
+);
+
+/**
+ * @route POST /api/leases/:id/amendments
+ * @desc Add an amendment to a lease
+ * @access Private (Landlord/Admin, PropertyManager)
+ */
+router.post(
+    '/:id/amendments',
+    protect,
+    authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.LANDLORD, ROLE_ENUM.PROPERTY_MANAGER),
+    validateMongoId('id'),
+    [
+        body('description')
+            .notEmpty().withMessage('Amendment description is required.')
+            .isString().trim()
+            .isLength({ max: 1000 }).withMessage('Description cannot exceed 1000 characters.'),
+        body('documentId')
+            .optional()
+            .isMongoId().withMessage('Document ID must be a valid MongoDB ID.'),
+        validateResult
+    ],
+    leaseController.addLeaseAmendment
+);
+
+/**
+ * @route GET /api/leases/:id/rent-report
+ * @desc Get rent report for a lease
+ * @access Private (Landlord/Admin, PropertyManager, Tenant)
+ */
+router.get(
+    '/:id/rent-report',
+    protect,
+    validateMongoId('id'),
+    dateRangeValidators,
+    leaseController.getLeaseRentReport
+);
+
+/**
+ * @route POST /api/leases/:id/rent-report/generate
+ * @desc Generate and download a rent report PDF
+ * @access Private (Landlord/Admin, PropertyManager, Tenant)
+ */
+router.post(
+    '/:id/rent-report/generate',
+    protect,
+    validateMongoId('id'),
+    [
+        body('startDate').optional().isISO8601().toDate().withMessage('Start date must be a valid date.'),
+        body('endDate').optional().isISO8601().toDate().withMessage('End date must be a valid date.'),
+        body('startDate').optional().custom((startDate, { req }) => {
+            if (req.body.endDate && new Date(startDate) > new Date(req.body.endDate)) {
+                throw new Error('Start date cannot be after end date.');
+            }
+            return true;
+        }),
+        validateResult
+    ],
+    leaseController.generateRentReportDocument
 );
 
 module.exports = router;

@@ -1,12 +1,12 @@
-// src/routes/vendorRoutes.js
+// server/routes/vendorRoutes.js
 
 const express = require('express');
 const router = express.Router();
 const { query } = require('express-validator');
-const vendorController = require('../controllers/vendorController'); // Import vendor controller
-const { protect, authorizeRoles } = require('../middleware/authMiddleware'); // Import auth middleware
-const { validateMongoId, validateVendor, validateResult } = require('../utils/validationUtils'); // Import validation utilities
-const { ROLE_ENUM } = require('../utils/constants/enums'); // Import enums for roles
+const vendorController = require('../controllers/vendorController');
+const { protect, authorizeRoles } = require('../middleware/authMiddleware');
+const { validateMongoId, validateVendor, validateResult } = require('../utils/validationUtils');
+const { ROLE_ENUM } = require('../utils/constants/enums');
 
 /**
  * @route POST /api/vendors
@@ -17,30 +17,43 @@ router.post(
     '/',
     protect,
     authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.PROPERTY_MANAGER, ROLE_ENUM.LANDLORD),
-    validateVendor, // Apply comprehensive vendor validation
+    validateVendor,
     vendorController.createVendor
 );
 
 /**
  * @route GET /api/vendors
- * @desc Get all vendors with filtering, search, and pagination
+ * @desc Get all vendors with filtering, search, pagination, and sorting
  * @access Private (Admin, PropertyManager, Landlord)
  */
 router.get(
     '/',
     protect,
     authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.PROPERTY_MANAGER, ROLE_ENUM.LANDLORD),
-    // Query parameter validation (optional, but good practice)
     [
-        query('status').optional().isIn(['active', 'inactive']).withMessage('Invalid status filter.'),
-        query('serviceTag').optional().isString().trim().withMessage('Service tag must be a string.'),
+        query('status').optional().isIn(['active', 'inactive', 'preferred']).withMessage('Invalid status filter.'),
+        query('service').optional().isString().trim().withMessage('Service tag must be a string.'),
         query('propertyId').optional().isMongoId().withMessage('Invalid Property ID format.'),
         query('search').optional().isString().trim().withMessage('Search query must be a string.'),
         query('page').optional().isInt({ min: 1 }).withMessage('Page must be a positive integer.'),
         query('limit').optional().isInt({ min: 1 }).withMessage('Limit must be a positive integer.'),
-        validateResult // Apply validation result handler for queries
+        query('sortBy').optional().isString().trim().withMessage('Sort field must be a string.'),
+        query('sortOrder').optional().isIn(['asc', 'desc']).withMessage('Sort order must be either "asc" or "desc".'),
+        validateResult
     ],
     vendorController.getAllVendors
+);
+
+/**
+ * @route GET /api/vendors/stats
+ * @desc Get vendor statistics
+ * @access Private (Admin, PropertyManager, Landlord)
+ */
+router.get(
+    '/stats',
+    protect,
+    authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.PROPERTY_MANAGER, ROLE_ENUM.LANDLORD),
+    vendorController.getVendorStats
 );
 
 /**
@@ -52,7 +65,7 @@ router.get(
     '/:id',
     protect,
     authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.PROPERTY_MANAGER, ROLE_ENUM.LANDLORD),
-    validateMongoId('id'), // Validate ID in params
+    validateMongoId('id'),
     vendorController.getVendorById
 );
 
@@ -65,8 +78,8 @@ router.put(
     '/:id',
     protect,
     authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.PROPERTY_MANAGER, ROLE_ENUM.LANDLORD),
-    validateMongoId('id'), // Validate ID in params
-    validateVendor, // Reuse vendor validation for updates (optional fields handled by optional())
+    validateMongoId('id'),
+    validateVendor,
     vendorController.updateVendor
 );
 
@@ -78,9 +91,59 @@ router.put(
 router.delete(
     '/:id',
     protect,
-    authorizeRoles(ROLE_ENUM.ADMIN), // Only global admin can delete vendors
-    validateMongoId('id'), // Validate ID in params
+    authorizeRoles(ROLE_ENUM.ADMIN),
+    validateMongoId('id'),
     vendorController.deleteVendor
+);
+
+/**
+ * @route POST /api/vendors/:id/rate
+ * @desc Rate a vendor's performance
+ * @access Private (Admin, PropertyManager, Landlord)
+ */
+router.post(
+    '/:id/rate',
+    protect,
+    authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.PROPERTY_MANAGER, ROLE_ENUM.LANDLORD),
+    validateMongoId('id'),
+    [
+        query('score').isInt({ min: 1, max: 5 }).withMessage('Rating score must be between 1 and 5.'),
+        query('comment').optional().isString().trim().withMessage('Comment must be a string.'),
+        query('requestId').optional().isMongoId().withMessage('Invalid Request ID format.'),
+        validateResult
+    ],
+    // This is a placeholder - you'll need to implement this controller method
+    (req, res) => {
+        res.status(501).json({
+            success: false,
+            message: 'Vendor rating functionality is not yet implemented'
+        });
+    }
+);
+
+/**
+ * @route PUT /api/vendors/:id/deactivate
+ * @desc Deactivate a vendor
+ * @access Private (Admin, PropertyManager who added the vendor)
+ */
+router.put(
+    '/:id/deactivate',
+    protect,
+    authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.PROPERTY_MANAGER),
+    validateMongoId('id'),
+    // This could use the updateVendor controller method with a predefined status
+    async (req, res) => {
+        try {
+            req.body = { status: 'inactive' };
+            return await vendorController.updateVendor(req, res);
+        } catch (error) {
+            res.status(500).json({
+                success: false,
+                message: 'Failed to deactivate vendor',
+                error: error.message
+            });
+        }
+    }
 );
 
 module.exports = router;

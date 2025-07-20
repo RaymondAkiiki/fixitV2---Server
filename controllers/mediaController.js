@@ -1,103 +1,114 @@
 // src/controllers/mediaController.js
 
 const asyncHandler = require('../utils/asyncHandler');
-const mediaService = require('../services/mediaService'); // Import the new media service
+const mediaService = require('../services/mediaService');
 const logger = require('../utils/logger');
 const AppError = require('../utils/AppError');
 
 /**
- * @desc Get all media records
+ * @desc Get all media records with filtering and pagination
  * @route GET /api/media
- * @access Private (Admin, Uploader, or user with access to related resource)
- * @query {string} [relatedTo] - Filter by type of related resource (e.g., 'Request', 'Property')
- * @query {string} [relatedId] - Filter by ID of related resource
- * @query {string} [uploadedBy] - Filter by uploader's ID
- * @query {string} [mimeType] - Filter by MIME type (partial match)
- * @query {boolean} [isPublic] - Filter by public status
- * @query {string} [search] - Search by original filename, description, or tags
- * @query {number} [page=1] - Page number
- * @query {number} [limit=10] - Items per page
+ * @access Private
  */
 const getAllMedia = asyncHandler(async (req, res) => {
-    const currentUser = req.user;
-    const filters = req.query;
+  const currentUser = req.user;
+  const filters = req.query;
+  const ipAddress = req.ip;
 
-    const { media, total, page, limit } = await mediaService.getAllMedia(currentUser, filters);
+  const { media, total, page, limit, totalPages } = await mediaService.getAllMedia(
+    currentUser, 
+    filters,
+    ipAddress
+  );
 
-    res.status(200).json({
-        success: true,
-        count: media.length,
-        total,
-        page,
-        limit,
-        data: media
-    });
+  res.status(200).json({
+    success: true,
+    count: media.length,
+    total,
+    page,
+    limit,
+    totalPages,
+    data: media
+  });
 });
 
 /**
  * @desc Get a single media record by ID
  * @route GET /api/media/:id
- * @access Private (Admin, Uploader, or user with access to related resource)
- * @param {string} id - Media ID from URL params
+ * @access Private
  */
 const getMediaById = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const currentUser = req.user;
+  const { id } = req.params;
+  const currentUser = req.user;
+  const ipAddress = req.ip;
 
-    const mediaDoc = await mediaService.getMediaById(id, currentUser);
+  const mediaDoc = await mediaService.getMediaById(id, currentUser, ipAddress);
 
-    res.status(200).json({
-        success: true,
-        data: mediaDoc
-    });
+  res.status(200).json({
+    success: true,
+    data: mediaDoc
+  });
 });
 
 /**
  * @desc Update a media record's metadata
  * @route PUT /api/media/:id
- * @access Private (Admin, Uploader)
- * @param {string} id - Media ID from URL params
- * @body {string} [description] - New description for the media
- * @body {Array<string>} [tags] - New array of tags
- * @body {boolean} [isPublic] - New public status
+ * @access Private
  */
 const updateMedia = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const updateData = req.body; // description, tags, isPublic
-    const currentUser = req.user;
-    const ipAddress = req.ip;
+  const { id } = req.params;
+  const updateData = req.body;
+  const currentUser = req.user;
+  const ipAddress = req.ip;
 
-    const updatedMedia = await mediaService.updateMedia(id, updateData, currentUser, ipAddress);
+  const updatedMedia = await mediaService.updateMedia(id, updateData, currentUser, ipAddress);
 
-    res.status(200).json({
-        success: true,
-        message: 'Media metadata updated successfully.',
-        data: updatedMedia
-    });
+  res.status(200).json({
+    success: true,
+    message: 'Media metadata updated successfully.',
+    data: updatedMedia
+  });
 });
 
 /**
  * @desc Delete a media record and its file from storage
  * @route DELETE /api/media/:id
- * @access Private (Admin, Uploader)
- * @param {string} id - Media ID from URL params
+ * @access Private
  */
 const deleteMedia = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const currentUser = req.user;
-    const ipAddress = req.ip;
+  const { id } = req.params;
+  const currentUser = req.user;
+  const ipAddress = req.ip;
 
-    await mediaService.deleteMedia(id, currentUser, ipAddress);
+  await mediaService.deleteMedia(id, currentUser, ipAddress);
 
-    res.status(200).json({
-        success: true,
-        message: 'Media record and associated file deleted successfully.'
-    });
+  res.status(200).json({
+    success: true,
+    message: 'Media record and associated file deleted successfully.'
+  });
+});
+
+/**
+ * @desc Get media usage statistics
+ * @route GET /api/media/stats
+ * @access Private
+ */
+const getMediaStats = asyncHandler(async (req, res) => {
+  const currentUser = req.user;
+  const ipAddress = req.ip;
+
+  const stats = await mediaService.getMediaStats(currentUser, ipAddress);
+
+  res.status(200).json({
+    success: true,
+    data: stats
+  });
 });
 
 module.exports = {
-    getAllMedia,
-    getMediaById,
-    updateMedia,
-    deleteMedia,
+  getAllMedia,
+  getMediaById,
+  updateMedia,
+  deleteMedia,
+  getMediaStats
 };

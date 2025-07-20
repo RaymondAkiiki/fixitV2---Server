@@ -68,6 +68,67 @@ const vendorSchema = new mongoose.Schema({
   }]
 }, { timestamps: true });
 
+// Virtual for getting all active maintenance requests assigned to this vendor
+vendorSchema.virtual('activeRequests', {
+  ref: 'Request',
+  localField: '_id',
+  foreignField: 'assignedTo',
+  match: { 
+    assignedToModel: 'Vendor',
+    status: { $in: ['new', 'assigned', 'in_progress', 'on_hold'] }
+  }
+});
+
+// Virtual for getting all scheduled maintenance assigned to this vendor
+vendorSchema.virtual('scheduledMaintenance', {
+  ref: 'ScheduledMaintenance',
+  localField: '_id',
+  foreignField: 'assignedTo',
+  match: { 
+    assignedToModel: 'Vendor',
+    status: 'active'
+  }
+});
+
+// Method to calculate and update the vendor's rating
+vendorSchema.methods.updateRating = async function(newRating) {
+  // Find all completed requests with ratings
+  const requests = await mongoose.model('Request').find({
+    assignedTo: this._id,
+    assignedToModel: 'Vendor',
+    status: 'completed',
+    'feedback.rating': { $exists: true, $ne: null }
+  });
+  
+  // Calculate new average rating
+  const ratings = requests.map(r => r.feedback.rating);
+  const totalRatings = ratings.length + (newRating ? 1 : 0);
+  
+  if (totalRatings > 0) {
+    const sum = ratings.reduce((a, b) => a + b, 0) + (newRating || 0);
+    this.averageRating = parseFloat((sum / totalRatings).toFixed(1));
+  } else {
+    this.averageRating = null;
+  }
+  
+  this.totalJobsCompleted = await mongoose.model('Request').countDocuments({
+    assignedTo: this._id,
+    assignedToModel: 'Vendor',
+    status: 'completed'
+  });
+  
+  await this.save();
+  return this;
+};
+
+// Pre-save hook to ensure all services are lowercase
+vendorSchema.pre('save', function(next) {
+  if (this.isModified('services')) {
+    this.services = this.services.map(s => s.toLowerCase());
+  }
+  next();
+});
+
 vendorSchema.index({ services: 1 });
 vendorSchema.index({ status: 1 });
 vendorSchema.index({ companyName: 1 });

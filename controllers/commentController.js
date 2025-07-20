@@ -1,22 +1,14 @@
 // src/controllers/commentController.js
 
-const asyncHandler = require('../utils/asyncHandler'); // For handling async errors
-const commentService = require('../services/commentService'); // Import the new comment service
-const logger = require('../utils/logger'); // Import logger
-const AppError = require('../utils/AppError'); // Import custom AppError
+const asyncHandler = require('../utils/asyncHandler');
+const commentService = require('../services/commentService');
+const logger = require('../utils/logger');
+const AppError = require('../utils/AppError');
 
 /**
  * @desc Add a comment to a specific resource context
  * @route POST /api/comments
  * @access Private (Authenticated users with context-specific authorization)
- * @body {string} contextType - The type of resource (e.g., 'Request', 'ScheduledMaintenance', 'Property', 'Unit')
- * @body {string} contextId - The ID of the resource
- * @body {string} message - The comment message
- * @body {boolean} [isExternal=false] - True if the comment is from an external user (e.g., public link)
- * @body {string} [externalUserName] - Name of the external user if isExternal is true
- * @body {string} [externalUserEmail] - Email of the external user if isExternal is true
- * @body {boolean} [isInternalNote=false] - True if the comment is an internal note (only visible to internal users)
- * @body {Array<string>} [media=[]] - Array of Media ObjectIds associated with the comment
  */
 const addComment = asyncHandler(async (req, res) => {
     const commentData = req.body;
@@ -36,14 +28,21 @@ const addComment = asyncHandler(async (req, res) => {
  * @desc List comments for a specific resource context
  * @route GET /api/comments
  * @access Private (Authenticated users with context-specific authorization)
- * @query {string} contextType - The type of resource
- * @query {string} contextId - The ID of the resource
  */
 const listComments = asyncHandler(async (req, res) => {
     const { contextType, contextId } = req.query;
+    const { includeInternal, limit, sort, order } = req.query;
     const currentUser = req.user;
+    
+    // Parse options
+    const options = {
+        includeInternal: includeInternal === 'false' ? false : true,
+        limit: limit ? parseInt(limit) : undefined,
+        sort: sort || undefined,
+        order: order || undefined
+    };
 
-    const comments = await commentService.listComments(contextType, contextId, currentUser);
+    const comments = await commentService.listComments(contextType, contextId, currentUser, options);
 
     res.status(200).json({
         success: true,
@@ -56,10 +55,6 @@ const listComments = asyncHandler(async (req, res) => {
  * @desc Update a specific comment
  * @route PUT /api/comments/:id
  * @access Private (Only the sender of the comment or Admin)
- * @param {string} id - The ID of the comment to update
- * @body {string} [message] - New message for the comment
- * @body {boolean} [isInternalNote] - New value for internal note status
- * @body {Array<string>} [media] - New array of Media ObjectIds associated with the comment
  */
 const updateComment = asyncHandler(async (req, res) => {
     const { id } = req.params;
@@ -80,7 +75,6 @@ const updateComment = asyncHandler(async (req, res) => {
  * @desc Delete a specific comment
  * @route DELETE /api/comments/:id
  * @access Private (Only the sender of the comment or Admin)
- * @param {string} id - The ID of the comment to delete
  */
 const deleteComment = asyncHandler(async (req, res) => {
     const { id } = req.params;
@@ -95,9 +89,49 @@ const deleteComment = asyncHandler(async (req, res) => {
     });
 });
 
+/**
+ * @desc Get unread mention count for current user
+ * @route GET /api/comments/mentions/count
+ * @access Private
+ */
+const getUnreadMentionCount = asyncHandler(async (req, res) => {
+    const userId = req.user._id;
+    
+    const count = await commentService.getUnreadMentionCount(userId);
+    
+    res.status(200).json({
+        success: true,
+        count
+    });
+});
+
+/**
+ * @desc Mark mentions as read for current user in a specific context
+ * @route POST /api/comments/mentions/mark-read
+ * @access Private
+ */
+const markMentionsAsRead = asyncHandler(async (req, res) => {
+    const { contextType, contextId } = req.body;
+    const userId = req.user._id;
+    
+    if (!contextType || !contextId) {
+        throw new AppError('Context type and context ID are required.', 400);
+    }
+    
+    const updatedCount = await commentService.markMentionsAsRead(userId, contextType, contextId);
+    
+    res.status(200).json({
+        success: true,
+        message: `Marked ${updatedCount} mentions as read.`,
+        count: updatedCount
+    });
+});
+
 module.exports = {
     addComment,
     listComments,
     updateComment,
     deleteComment,
+    getUnreadMentionCount,
+    markMentionsAsRead
 };

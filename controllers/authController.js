@@ -1,8 +1,10 @@
+// src/controllers/authController.js
+
 const asyncHandler = require('../utils/asyncHandler');
 const authService = require('../services/authService');
+const userService = require('../services/userService');
 const logger = require('../utils/logger');
 const AppError = require('../utils/AppError');
-const { getUserProfile } = require('./userController'); // Import getUserProfile
 
 /**
  * @desc Register a new user (classic)
@@ -11,7 +13,16 @@ const { getUserProfile } = require('./userController'); // Import getUserProfile
  */
 const registerUser = asyncHandler(async (req, res) => {
     const { firstName, lastName, email, phone, password, role } = req.body;
-    const user = await authService.registerUser({ firstName, lastName, email, phone, password, role });
+    
+    const user = await authService.registerUser({ 
+        firstName, 
+        lastName, 
+        email, 
+        phone, 
+        password, 
+        role 
+    });
+    
     res.status(201).json({
         success: true,
         message: 'User registered successfully. Please check your email for verification if applicable.',
@@ -27,13 +38,15 @@ const registerUser = asyncHandler(async (req, res) => {
 const loginUser = asyncHandler(async (req, res) => {
     const { email, password } = req.body;
     const ipAddress = req.ip;
+    
     const { user, accessToken } = await authService.loginUser(email, password, ipAddress);
 
+    // Set HTTP-only cookie with token
     res.cookie('jwt', accessToken, {
         httpOnly: true,
         secure: process.env.NODE_ENV === 'production',
         sameSite: 'strict',
-        maxAge: 24 * 60 * 60 * 1000
+        maxAge: 24 * 60 * 60 * 1000 // 24 hours
     });
 
     res.status(200).json({
@@ -50,30 +63,35 @@ const loginUser = asyncHandler(async (req, res) => {
  * @access Private
  */
 const getMe = asyncHandler(async (req, res) => {
-    // This function will now handle the GET /api/auth/me route
-    // It reuses the logic from userController.getUserProfile
-    await getUserProfile(req, res);
+    const userProfile = await userService.getUserProfile(req.user._id);
+    
+    res.status(200).json({
+        success: true,
+        user: userProfile
+    });
 });
-
 
 /**
  * @desc Authenticate or register a user via Google OAuth
  * @route POST /api/auth/google
  * @access Public
- * @body {string} idToken
  */
 const loginWithGoogle = asyncHandler(async (req, res) => {
     const { idToken } = req.body;
     const ipAddress = req.ip;
-    if (!idToken) throw new AppError('Google ID token is required.', 400);
+    
+    if (!idToken) {
+        throw new AppError('Google ID token is required.', 400);
+    }
 
     const { user, accessToken } = await authService.loginOrRegisterWithGoogle(idToken, ipAddress);
 
+    // Set HTTP-only cookie with token
     res.cookie('jwt', accessToken, {
         httpOnly: true,
         secure: process.env.NODE_ENV === 'production',
         sameSite: 'strict',
-        maxAge: 24 * 60 * 60 * 1000
+        maxAge: 24 * 60 * 60 * 1000 // 24 hours
     });
 
     res.status(200).json({
@@ -90,13 +108,18 @@ const loginWithGoogle = asyncHandler(async (req, res) => {
  * @access Private
  */
 const logoutUser = asyncHandler(async (req, res) => {
+    // Clear JWT cookie
     res.cookie('jwt', '', {
         httpOnly: true,
         expires: new Date(0)
     });
 
     logger.info(`Auth: User ${req.user ? req.user.email : 'unknown'} logged out.`);
-    res.status(200).json({ success: true, message: 'Logged out successfully.' });
+    
+    res.status(200).json({ 
+        success: true, 
+        message: 'Logged out successfully.' 
+    });
 });
 
 /**
@@ -107,10 +130,14 @@ const logoutUser = asyncHandler(async (req, res) => {
 const changePassword = asyncHandler(async (req, res) => {
     const { currentPassword, newPassword } = req.body;
     const userId = req.user._id;
+    const ipAddress = req.ip;
 
-    await authService.updatePassword(userId, currentPassword, newPassword);
+    await authService.updatePassword(userId, currentPassword, newPassword, ipAddress);
 
-    res.status(200).json({ success: true, message: 'Password updated successfully.' });
+    res.status(200).json({ 
+        success: true, 
+        message: 'Password updated successfully.' 
+    });
 });
 
 /**
@@ -122,7 +149,9 @@ const forgotPassword = asyncHandler(async (req, res) => {
     const { email } = req.body;
     const frontendUrl = process.env.FRONTEND_URL;
 
-    if (!email) throw new AppError('Email is required for password reset.', 400);
+    if (!email) {
+        throw new AppError('Email is required for password reset.', 400);
+    }
 
     await authService.initiatePasswordReset(email, frontendUrl);
 
@@ -141,7 +170,9 @@ const resetPassword = asyncHandler(async (req, res) => {
     const { token } = req.params;
     const { newPassword } = req.body;
 
-    if (!newPassword) throw new AppError('New password is required.', 400);
+    if (!newPassword) {
+        throw new AppError('New password is required.', 400);
+    }
 
     await authService.resetPassword(token, newPassword);
 
@@ -156,53 +187,48 @@ const resetPassword = asyncHandler(async (req, res) => {
  * @route GET /api/auth/verify-email/:token
  * @access Public
  */
-const verifyEmail = asyncHandler(async (req, res, next) => { // Added 'next' for consistency
+const verifyEmail = asyncHandler(async (req, res) => {
     const { token } = req.params;
 
-    // ✨ KEY CHANGE: Call the service and send a JSON response
     const result = await authService.verifyEmail(token);
+    
     res.status(200).json({
         success: true,
-        message: result.message // Use the message from the service
+        message: result.message
     });
-    // NO res.redirect() here! Frontend will handle navigation.
 });
 
-// Locate the `sendVerificationEmail` controller function and modify it
-// to handle both authenticated (req.user._id) and unauthenticated (req.body.email) requests.
 /**
  * @desc Request email verification (send email with token)
  * @route POST /api/auth/send-verification-email
- * @access Public (Can be called by unauthenticated users providing email, or authenticated users without email in body)
+ * @access Public/Private
  */
 const sendVerificationEmail = asyncHandler(async (req, res) => {
-    const { email } = req.body; // Expect email in body for public resend
-    const userId = req.user ? req.user._id : null; // Get userId if authenticated
-
+    const { email } = req.body; // For public route
+    const userId = req.user ? req.user._id : null; // For authenticated route
     const frontendUrl = process.env.FRONTEND_URL;
 
     if (!userId && !email) {
-        throw new AppError('Email address is required to resend verification link if not logged in.', 400);
+        throw new AppError('Email address is required if not logged in.', 400);
     }
 
-    // Pass userId if authenticated, otherwise pass the email from the body
     const result = await authService.sendEmailVerification(userId, frontendUrl, email);
 
     res.status(200).json({
         success: true,
-        message: result.message || 'Verification email sent. Please check your inbox.'
+        message: result.message
     });
 });
 
 module.exports = {
     registerUser,
     loginUser,
-    getMe, // Export the new function
+    getMe,
     loginWithGoogle,
     logoutUser,
     changePassword,
     forgotPassword,
     resetPassword,
-    sendVerificationEmail,
     verifyEmail,
+    sendVerificationEmail
 };

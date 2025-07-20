@@ -2,50 +2,104 @@
 
 const express = require('express');
 const router = express.Router();
-const requestController = require('../controllers/requestController'); // Import controller
-const { protect, authorizeRoles } = require('../middleware/authMiddleware'); // Import auth middleware
-const { upload, uploadToCloudinary } = require('../middleware/uploadMiddleware'); // <--- CORRECTED IMPORT
+const requestController = require('../controllers/requestController');
+const { protect, authorizeRoles } = require('../middleware/authMiddleware');
+const { upload } = require('../middleware/uploadMiddleware');
+const { validateMongoId, validateResult } = require('../utils/validationUtils');
+const { 
+    ROLE_ENUM, 
+    REQUEST_STATUS_ENUM, 
+    CATEGORY_ENUM, 
+    PRIORITY_ENUM, 
+    ASSIGNED_TO_MODEL_ENUM 
+} = require('../utils/constants/enums');
+const { body, query, param } = require('express-validator');
 
-const { validateMongoId, validateRequest, validateResult } = require('../utils/validationUtils'); // Import validation utilities
-const { ROLE_ENUM, REQUEST_STATUS_ENUM, CATEGORY_ENUM, PRIORITY_ENUM, ASSIGNED_TO_MODEL_ENUM } = require('../utils/constants/enums'); // Import enums
-const { body, query, param } = require('express-validator'); // For specific body/query/param validation
-
+// Public routes first (order matters for routes with overlapping patterns)
 
 /**
- * @route POST /api/requests/:id/media
- * @desc Upload media file(s) for a request
- * @access Private (Tenant, PropertyManager, Landlord, Admin, Assigned Vendor/User)
- * @param {string} id - Request ID from URL params
- * @body {Array<object>} files - Array of uploaded files from multer
- *
- * This route now handles both single and multiple file uploads using `upload.any()`.
- * The `uploadToCloudinary` middleware (if used for single files) or a custom loop
- * within `requestController.uploadMedia` will handle the Cloudinary upload and Media model saving.
+ * @route GET /api/requests/public/:publicToken
+ * @desc Get external view of a request
+ * @access Public
+ */
+router.get(
+    '/public/:publicToken',
+    [
+        param('publicToken')
+            .notEmpty().withMessage('Public token is required.')
+            .isString().withMessage('Public token must be a string.'),
+        validateResult
+    ],
+    requestController.getPublicRequestView
+);
+
+/**
+ * @route POST /api/requests/public/:publicToken/update
+ * @desc External user updates status/comments for a request
+ * @access Public (limited functionality)
  */
 router.post(
-    '/:id/media', // Use :id consistently
-    protect,
-    authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.PROPERTY_MANAGER, ROLE_ENUM.LANDLORD, ROLE_ENUM.TENANT, ROLE_ENUM.VENDOR),
-    validateMongoId('id'), // Validate ID in params
-    upload.any(), // Use upload.any() to accept any number of files (single or multiple)
-    requestController.uploadMedia // This controller will now process req.files
+    '/public/:publicToken/update',
+    [
+        param('publicToken')
+            .notEmpty().withMessage('Public token is required.')
+            .isString().withMessage('Public token must be a string.'),
+        body('name')
+            .notEmpty().withMessage('Name is required for public update.')
+            .trim(),
+        body('phone')
+            .notEmpty().withMessage('Phone is required for public update.')
+            .trim()
+            .isMobilePhone('any', { strictMode: false }).withMessage('Please provide a valid phone number.'),
+        body('status')
+            .optional()
+            .isIn(['in_progress', 'completed']).withMessage('Invalid status for public update. Must be "in_progress" or "completed".'),
+        body('commentMessage')
+            .optional()
+            .isString().trim()
+            .isLength({ max: 1000 }).withMessage('Comment message cannot exceed 1000 characters.'),
+        validateResult
+    ],
+    requestController.publicRequestUpdate
 );
+
+// Protected routes
+
 /**
  * @route POST /api/requests
  * @desc Create a new maintenance request
  * @access Private (Tenant, PropertyManager, Landlord, Admin)
- * @body {string} title, {string} description, {string} category, {string} priority,
- * {string} propertyId, {string} [unitId], {Array<File>} [files] - Multi-part form data for media
  */
 router.post(
     '/',
     protect,
     authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.PROPERTY_MANAGER, ROLE_ENUM.LANDLORD, ROLE_ENUM.TENANT),
-    upload.array('files'), // Assuming 'files' is the field name for multiple files
-    validateRequest, // Apply comprehensive validation for body
+    upload.array('files'), // Use 'files' field name for consistency with frontend
+    [
+        body('title')
+            .notEmpty().withMessage('Title is required.')
+            .trim()
+            .isLength({ min: 3, max: 200 }).withMessage('Title must be between 3 and 200 characters.'),
+        body('description')
+            .notEmpty().withMessage('Description is required.')
+            .trim()
+            .isLength({ min: 10, max: 2000 }).withMessage('Description must be between 10 and 2000 characters.'),
+        body('category')
+            .optional()
+            .isIn(CATEGORY_ENUM).withMessage(`Invalid category. Must be one of: ${CATEGORY_ENUM.join(', ')}`),
+        body('priority')
+            .optional()
+            .isIn(PRIORITY_ENUM).withMessage(`Invalid priority. Must be one of: ${PRIORITY_ENUM.join(', ')}`),
+        body('propertyId')
+            .notEmpty().withMessage('Property ID is required.')
+            .isMongoId().withMessage('Property ID must be a valid MongoDB ID.'),
+        body('unitId')
+            .optional()
+            .isMongoId().withMessage('Unit ID must be a valid MongoDB ID.'),
+        validateResult
+    ],
     requestController.createRequest
 );
-
 
 /**
  * @route GET /api/requests
@@ -55,21 +109,44 @@ router.post(
 router.get(
     '/',
     protect,
-    // Authorization is handled within the service for granular access based on user role and property association
     [
-        query('status').optional().isIn(REQUEST_STATUS_ENUM).withMessage(`Invalid status filter. Must be one of: ${REQUEST_STATUS_ENUM.join(', ')}`),
-        query('category').optional().isIn(CATEGORY_ENUM).withMessage(`Invalid category filter. Must be one of: ${CATEGORY_ENUM.join(', ')}`),
-        query('priority').optional().isIn(PRIORITY_ENUM).withMessage(`Invalid priority filter. Must be one of: ${PRIORITY_ENUM.join(', ')}`),
-        query('propertyId').optional().isMongoId().withMessage('Invalid Property ID format.'),
-        query('unitId').optional().isMongoId().withMessage('Invalid Unit ID format.'),
-        query('search').optional().isString().trim().withMessage('Search query must be a string.'),
-        query('startDate').optional().isISO8601().toDate().withMessage('Start date must be a valid date.'),
-        query('endDate').optional().isISO8601().toDate().withMessage('End date must be a valid date.'),
-        query('assignedToId').optional().isMongoId().withMessage('Invalid Assigned To ID format.'),
-        query('assignedToType').optional().isIn(ASSIGNED_TO_MODEL_ENUM).withMessage(`Invalid Assigned To Type. Must be one of: ${ASSIGNED_TO_MODEL_ENUM.join(', ')}`),
-        query('page').optional().isInt({ min: 1 }).withMessage('Page must be a positive integer.'),
-        query('limit').optional().isInt({ min: 1 }).withMessage('Limit must be a positive integer.'),
-        validateResult // Apply validation result handler for queries
+        query('status')
+            .optional()
+            .isIn(REQUEST_STATUS_ENUM).withMessage(`Invalid status filter. Must be one of: ${REQUEST_STATUS_ENUM.join(', ')}`),
+        query('category')
+            .optional()
+            .isIn(CATEGORY_ENUM).withMessage(`Invalid category filter. Must be one of: ${CATEGORY_ENUM.join(', ')}`),
+        query('priority')
+            .optional()
+            .isIn(PRIORITY_ENUM).withMessage(`Invalid priority filter. Must be one of: ${PRIORITY_ENUM.join(', ')}`),
+        query('propertyId')
+            .optional()
+            .isMongoId().withMessage('Property ID filter must be a valid MongoDB ID.'),
+        query('unitId')
+            .optional()
+            .isMongoId().withMessage('Unit ID filter must be a valid MongoDB ID.'),
+        query('search')
+            .optional()
+            .isString().trim().withMessage('Search query must be a string.'),
+        query('startDate')
+            .optional()
+            .isISO8601().toDate().withMessage('Start date must be a valid date.'),
+        query('endDate')
+            .optional()
+            .isISO8601().toDate().withMessage('End date must be a valid date.'),
+        query('assignedToId')
+            .optional()
+            .isMongoId().withMessage('Assigned To ID filter must be a valid MongoDB ID.'),
+        query('assignedToType')
+            .optional()
+            .isIn(ASSIGNED_TO_MODEL_ENUM).withMessage(`Invalid Assigned To Type. Must be one of: ${ASSIGNED_TO_MODEL_ENUM.join(', ')}`),
+        query('page')
+            .optional()
+            .isInt({ min: 1 }).withMessage('Page must be a positive integer.'),
+        query('limit')
+            .optional()
+            .isInt({ min: 1, max: 100 }).withMessage('Limit must be between 1 and 100.'),
+        validateResult
     ],
     requestController.getAllRequests
 );
@@ -82,21 +159,44 @@ router.get(
 router.get(
     '/:id',
     protect,
-    validateMongoId('id'), // Validate ID in params
+    validateMongoId('id'),
     requestController.getRequestById
 );
 
 /**
  * @route PUT /api/requests/:id
- * @desc Update a maintenance request (status, priority, description by authorized users)
- * @access Private (Admin, PropertyManager, Landlord - with access control; Tenant for limited fields)
+ * @desc Update a maintenance request
+ * @access Private (Admin, PropertyManager, Landlord, Tenant for limited fields)
  */
 router.put(
     '/:id',
     protect,
-    authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.PROPERTY_MANAGER, ROLE_ENUM.LANDLORD, ROLE_ENUM.TENANT), // Tenant has limited update
-    validateMongoId('id'), // Validate ID in params
-    validateRequest, // Reuse validation for updates (optional fields handled by optional())
+    authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.PROPERTY_MANAGER, ROLE_ENUM.LANDLORD, ROLE_ENUM.TENANT),
+    validateMongoId('id'),
+    [
+        body('title')
+            .optional()
+            .trim()
+            .isLength({ min: 3, max: 200 }).withMessage('Title must be between 3 and 200 characters.'),
+        body('description')
+            .optional()
+            .trim()
+            .isLength({ min: 10, max: 2000 }).withMessage('Description must be between 10 and 2000 characters.'),
+        body('category')
+            .optional()
+            .isIn(CATEGORY_ENUM).withMessage(`Invalid category. Must be one of: ${CATEGORY_ENUM.join(', ')}`),
+        body('priority')
+            .optional()
+            .isIn(PRIORITY_ENUM).withMessage(`Invalid priority. Must be one of: ${PRIORITY_ENUM.join(', ')}`),
+        body('status')
+            .optional()
+            .isIn(REQUEST_STATUS_ENUM).withMessage(`Invalid status. Must be one of: ${REQUEST_STATUS_ENUM.join(', ')}`),
+        body('statusNotes')
+            .optional()
+            .isString().trim()
+            .isLength({ max: 500 }).withMessage('Status notes cannot exceed 500 characters.'),
+        validateResult
+    ],
     requestController.updateRequest
 );
 
@@ -109,7 +209,7 @@ router.delete(
     '/:id',
     protect,
     authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.PROPERTY_MANAGER, ROLE_ENUM.LANDLORD),
-    validateMongoId('id'), // Validate ID in params
+    validateMongoId('id'),
     requestController.deleteRequest
 );
 
@@ -122,28 +222,30 @@ router.post(
     '/:id/assign',
     protect,
     authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.PROPERTY_MANAGER, ROLE_ENUM.LANDLORD),
-    validateMongoId('id'), // Validate request ID in params
+    validateMongoId('id'),
     [
-        body('assignedToId').notEmpty().withMessage('Assigned To ID is required').isMongoId().withMessage('Assigned To ID must be a valid MongoDB ID.'),
-        body('assignedToModel').notEmpty().withMessage('Assigned To Model is required').isIn(ASSIGNED_TO_MODEL_ENUM).withMessage(`Invalid Assigned To Model. Must be one of: ${ASSIGNED_TO_MODEL_ENUM.join(', ')}`),
+        body('assignedToId')
+            .notEmpty().withMessage('Assigned To ID is required.')
+            .isMongoId().withMessage('Assigned To ID must be a valid MongoDB ID.'),
+        body('assignedToModel')
+            .notEmpty().withMessage('Assigned To Model is required.')
+            .isIn(ASSIGNED_TO_MODEL_ENUM).withMessage(`Invalid Assigned To Model. Must be one of: ${ASSIGNED_TO_MODEL_ENUM.join(', ')}`),
         validateResult
     ],
     requestController.assignRequest
 );
+
 /**
  * @route POST /api/requests/:id/media
  * @desc Upload media file(s) for a request
  * @access Private (Tenant, PropertyManager, Landlord, Admin, Assigned Vendor/User)
- * @param {string} id - Request ID from URL params
- * @body {Array<File>} mediaFiles - Array of uploaded files from multipart/form-data (field name 'mediaFiles')
  */
 router.post(
     '/:id/media',
     protect,
     authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.PROPERTY_MANAGER, ROLE_ENUM.LANDLORD, ROLE_ENUM.TENANT, ROLE_ENUM.VENDOR),
     validateMongoId('id'),
-    // REFACTORED PART: Use upload.array() to handle multiple files from a field named 'mediaFiles'
-    upload.array('mediaFiles'), 
+    upload.array('mediaFiles'), // Using 'mediaFiles' to match frontend naming
     requestController.uploadMedia
 );
 
@@ -158,7 +260,9 @@ router.delete(
     authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.PROPERTY_MANAGER, ROLE_ENUM.LANDLORD, ROLE_ENUM.TENANT, ROLE_ENUM.VENDOR),
     validateMongoId('id'),
     [
-        body('mediaUrl').notEmpty().withMessage('Media URL is required to delete.').isURL().withMessage('Media URL must be a valid URL.'),
+        body('mediaUrl')
+            .notEmpty().withMessage('Media URL is required to delete.')
+            .isURL().withMessage('Media URL must be a valid URL.'),
         validateResult
     ],
     requestController.deleteMedia
@@ -172,11 +276,16 @@ router.delete(
 router.post(
     '/:id/feedback',
     protect,
-    authorizeRoles(ROLE_ENUM.TENANT), // Only tenants can submit feedback for their requests
+    authorizeRoles(ROLE_ENUM.TENANT),
     validateMongoId('id'),
     [
-        body('rating').notEmpty().withMessage('Rating is required').isInt({ min: 1, max: 5 }).withMessage('Rating must be between 1 and 5.'),
-        body('comment').optional().isString().trim().isLength({ max: 1000 }).withMessage('Comment cannot exceed 1000 characters.'),
+        body('rating')
+            .notEmpty().withMessage('Rating is required.')
+            .isInt({ min: 1, max: 5 }).withMessage('Rating must be between 1 and 5.'),
+        body('comment')
+            .optional()
+            .isString().trim()
+            .isLength({ max: 1000 }).withMessage('Comment cannot exceed 1000 characters.'),
         validateResult
     ],
     requestController.submitFeedback
@@ -193,7 +302,9 @@ router.post(
     authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.PROPERTY_MANAGER, ROLE_ENUM.LANDLORD),
     validateMongoId('id'),
     [
-        body('expiresInDays').optional().isInt({ min: 1 }).withMessage('Expires in days must be a positive integer.'),
+        body('expiresInDays')
+            .optional()
+            .isInt({ min: 1, max: 90 }).withMessage('Expires in days must be between 1 and 90.'),
         validateResult
     ],
     requestController.enablePublicLink
@@ -249,40 +360,6 @@ router.put(
     authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.PROPERTY_MANAGER, ROLE_ENUM.LANDLORD),
     validateMongoId('id'),
     requestController.archiveRequest
-);
-
-// Public routes (no authentication required, but require valid publicToken)
-
-/**
- * @route GET /api/requests/public/:publicToken
- * @desc Get external view of a request
- * @access Public
- */
-router.get(
-    '/public/:publicToken',
-    [
-        param('publicToken').notEmpty().withMessage('Public token is required.').isString().withMessage('Public token must be a string.'),
-        validateResult
-    ],
-    requestController.getPublicRequestView
-);
-
-/**
- * @route POST /api/requests/public/:publicToken/update
- * @desc External user updates status/comments for a request
- * @access Public (limited functionality)
- */
-router.post(
-    '/public/:publicToken/update',
-    [
-        param('publicToken').notEmpty().withMessage('Public token is required.').isString().withMessage('Public token must be a string.'),
-        body('name').notEmpty().withMessage('Name is required for public update.').trim(),
-        body('phone').notEmpty().withMessage('Phone is required for public update.').trim().isMobilePhone('any', { strictMode: false }).withMessage('Please provide a valid phone number.'),
-        body('status').optional().isIn(['in_progress', 'completed']).withMessage('Invalid status for public update. Must be "in_progress" or "completed".'), // Specific allowed statuses
-        body('commentMessage').optional().isString().trim().isLength({ max: 1000 }).withMessage('Comment message cannot exceed 1000 characters.'),
-        validateResult
-    ],
-    requestController.publicRequestUpdate
 );
 
 module.exports = router;

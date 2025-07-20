@@ -1,209 +1,423 @@
 // src/controllers/scheduledMaintenanceController.js
 
-const asyncHandler = require('../utils/asyncHandler'); // For handling async errors
-const scheduledMaintenanceService = require('../services/scheduledMaintenanceService'); // Import the new service
-const logger = require('../utils/logger'); // Import logger
-const AppError = require('../utils/AppError'); // Import custom AppError
+const asyncHandler = require('../utils/asyncHandler');
+const scheduledMaintenanceService = require('../services/scheduledMaintenanceService');
+const logger = require('../utils/logger');
+const AppError = require('../utils/AppError');
 
 /**
  * @desc Create a new scheduled maintenance task
  * @route POST /api/scheduled-maintenance
  * @access Private (PropertyManager, Landlord, Admin)
- * @body {string} title, {string} description, {string} category, {string} property, {string} [unit],
- * {Date} scheduledDate, {boolean} recurring, {object} [frequency], {string} [assignedToId], {string} [assignedToModel],
- * {string[]} [media] - Array of media URLs/IDs
  */
 const createScheduledMaintenance = asyncHandler(async (req, res) => {
-    const taskData = req.body;
-    const currentUser = req.user;
-    const ipAddress = req.ip;
+    try {
+        const taskData = {
+            ...req.body,
+            files: req.files || []
+        };
+        
+        // Parse frequency JSON if it's a string
+        if (taskData.frequency && typeof taskData.frequency === 'string') {
+            try {
+                taskData.frequency = JSON.parse(taskData.frequency);
+            } catch (e) {
+                throw new AppError('Invalid frequency format. Must be a valid JSON object.', 400);
+            }
+        }
+        
+        const currentUser = req.user;
+        const ipAddress = req.ip;
 
-    // Media handling: assuming media is already uploaded and URLs/IDs are in req.body.media
-    // If files are uploaded via multer, they would be processed by uploadMiddleware
-    // and then their Cloudinary URLs would be added to taskData.media before calling the service.
+        const newTask = await scheduledMaintenanceService.createScheduledMaintenance(taskData, currentUser, ipAddress);
 
-    const newTask = await scheduledMaintenanceService.createScheduledMaintenance(taskData, currentUser, ipAddress);
-
-    res.status(201).json({
-        success: true,
-        message: 'Scheduled maintenance task created successfully.',
-        task: newTask
-    });
+        res.status(201).json({
+            success: true,
+            message: 'Scheduled maintenance task created successfully.',
+            data: newTask
+        });
+    } catch (error) {
+        logger.error(`ScheduledMaintenanceController - Error creating task: ${error.message}`);
+        throw error;
+    }
 });
 
 /**
  * @desc Get all scheduled maintenance tasks with filtering, search, and pagination
  * @route GET /api/scheduled-maintenance
  * @access Private (with access control)
- * @query {string} [status] - Filter by task status
- * @query {boolean} [recurring] - Filter by recurrence (true/false)
- * @query {string} [propertyId] - Filter by associated property
- * @query {string} [unitId] - Filter by associated unit
- * @query {string} [category] - Filter by category
- * @query {string} [search] - Search by title or description
- * @query {Date} [startDate] - Filter tasks scheduled on or after this date
- * @query {Date} [endDate] - Filter tasks scheduled on or before this date
- * @query {number} [page=1] - Page number
- * @query {number} [limit=10] - Items per page
  */
 const getAllScheduledMaintenance = asyncHandler(async (req, res) => {
-    const currentUser = req.user;
-    const filters = req.query;
-    const page = req.query.page || 1;
-    const limit = req.query.limit || 10;
+    try {
+        const currentUser = req.user;
+        const filters = req.query;
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 10;
 
-    const { tasks, total, page: currentPage, limit: currentLimit } = await scheduledMaintenanceService.getAllScheduledMaintenance(currentUser, filters, page, limit);
+        const result = await scheduledMaintenanceService.getAllScheduledMaintenance(currentUser, filters, page, limit);
 
-    res.status(200).json({
-        success: true,
-        count: tasks.length,
-        total,
-        page: currentPage,
-        limit: currentLimit,
-        data: tasks
-    });
+        res.status(200).json({
+            success: true,
+            count: result.tasks.length,
+            total: result.total,
+            page: result.page,
+            limit: result.limit,
+            pages: result.pages,
+            data: result.tasks
+        });
+    } catch (error) {
+        logger.error(`ScheduledMaintenanceController - Error getting tasks: ${error.message}`);
+        throw error;
+    }
 });
 
 /**
  * @desc Get a single scheduled maintenance task by ID
  * @route GET /api/scheduled-maintenance/:id
  * @access Private (with access control)
- * @param {string} id - Task ID from URL params
  */
 const getScheduledMaintenanceById = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const currentUser = req.user;
+    try {
+        const { id } = req.params;
+        const currentUser = req.user;
 
-    const task = await scheduledMaintenanceService.getScheduledMaintenanceById(id, currentUser);
+        const task = await scheduledMaintenanceService.getScheduledMaintenanceById(id, currentUser);
 
-    res.status(200).json({
-        success: true,
-        task: task
-    });
+        res.status(200).json({
+            success: true,
+            data: task
+        });
+    } catch (error) {
+        logger.error(`ScheduledMaintenanceController - Error getting task: ${error.message}`);
+        throw error;
+    }
 });
 
 /**
  * @desc Update a scheduled maintenance task
  * @route PUT /api/scheduled-maintenance/:id
  * @access Private (PropertyManager, Landlord, Admin)
- * @param {string} id - Task ID from URL params
- * @body {string} [title], {string} [description], {string} [category], {Date} [scheduledDate],
- * {boolean} [recurring], {object} [frequency], {string} [assignedToId], {string} [assignedToModel],
- * {string} [status], {string[]} [media]
  */
 const updateScheduledMaintenance = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const updateData = req.body;
-    const currentUser = req.user;
-    const ipAddress = req.ip;
+    try {
+        const { id } = req.params;
+        const updateData = req.body;
+        const currentUser = req.user;
+        const ipAddress = req.ip;
+        
+        // Parse frequency JSON if it's a string
+        if (updateData.frequency && typeof updateData.frequency === 'string') {
+            try {
+                updateData.frequency = JSON.parse(updateData.frequency);
+            } catch (e) {
+                throw new AppError('Invalid frequency format. Must be a valid JSON object.', 400);
+            }
+        }
 
-    const updatedTask = await scheduledMaintenanceService.updateScheduledMaintenance(id, updateData, currentUser, ipAddress);
+        const updatedTask = await scheduledMaintenanceService.updateScheduledMaintenance(id, updateData, currentUser, ipAddress);
 
-    res.status(200).json({
-        success: true,
-        message: 'Scheduled maintenance task updated successfully.',
-        task: updatedTask
-    });
+        res.status(200).json({
+            success: true,
+            message: 'Scheduled maintenance task updated successfully.',
+            data: updatedTask
+        });
+    } catch (error) {
+        logger.error(`ScheduledMaintenanceController - Error updating task: ${error.message}`);
+        throw error;
+    }
 });
 
 /**
  * @desc Delete a scheduled maintenance task
  * @route DELETE /api/scheduled-maintenance/:id
  * @access Private (PropertyManager, Landlord, Admin)
- * @param {string} id - Task ID from URL params
  */
 const deleteScheduledMaintenance = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const currentUser = req.user;
-    const ipAddress = req.ip;
+    try {
+        const { id } = req.params;
+        const currentUser = req.user;
+        const ipAddress = req.ip;
 
-    await scheduledMaintenanceService.deleteScheduledMaintenance(id, currentUser, ipAddress);
+        await scheduledMaintenanceService.deleteScheduledMaintenance(id, currentUser, ipAddress);
 
-    res.status(200).json({
-        success: true,
-        message: 'Scheduled maintenance task deleted successfully.'
-    });
+        res.status(200).json({
+            success: true,
+            message: 'Scheduled maintenance task deleted successfully.'
+        });
+    } catch (error) {
+        logger.error(`ScheduledMaintenanceController - Error deleting task: ${error.message}`);
+        throw error;
+    }
 });
 
 /**
  * @desc Enable public link for a scheduled maintenance task
  * @route POST /api/scheduled-maintenance/:id/enable-public-link
  * @access Private (PropertyManager, Landlord, Admin)
- * @param {string} id - Task ID from URL params
- * @body {number} [expiresInDays] - Optional: duration in days for the link to be valid.
  */
 const enableScheduledMaintenancePublicLink = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const { expiresInDays } = req.body;
-    const currentUser = req.user;
-    const ipAddress = req.ip;
+    try {
+        const { id } = req.params;
+        const { expiresInDays } = req.body;
+        const currentUser = req.user;
+        const ipAddress = req.ip;
 
-    const publicLink = await scheduledMaintenanceService.enableScheduledMaintenancePublicLink(id, expiresInDays, currentUser, ipAddress);
+        const publicLink = await scheduledMaintenanceService.enableScheduledMaintenancePublicLink(id, expiresInDays, currentUser, ipAddress);
 
-    res.status(200).json({
-        success: true,
-        message: 'Public link enabled successfully.',
-        publicLink: publicLink
-    });
+        res.status(200).json({
+            success: true,
+            message: 'Public link enabled successfully.',
+            publicLink
+        });
+    } catch (error) {
+        logger.error(`ScheduledMaintenanceController - Error enabling public link: ${error.message}`);
+        throw error;
+    }
 });
 
 /**
  * @desc Disable public link for a scheduled maintenance task
  * @route POST /api/scheduled-maintenance/:id/disable-public-link
  * @access Private (PropertyManager, Landlord, Admin)
- * @param {string} id - Task ID from URL params
  */
 const disableScheduledMaintenancePublicLink = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const currentUser = req.user;
-    const ipAddress = req.ip;
+    try {
+        const { id } = req.params;
+        const currentUser = req.user;
+        const ipAddress = req.ip;
 
-    await scheduledMaintenanceService.disableScheduledMaintenancePublicLink(id, currentUser, ipAddress);
+        await scheduledMaintenanceService.disableScheduledMaintenancePublicLink(id, currentUser, ipAddress);
 
-    res.status(200).json({
-        success: true,
-        message: 'Public link disabled successfully.'
-    });
+        res.status(200).json({
+            success: true,
+            message: 'Public link disabled successfully.'
+        });
+    } catch (error) {
+        logger.error(`ScheduledMaintenanceController - Error disabling public link: ${error.message}`);
+        throw error;
+    }
 });
 
 /**
  * @desc Get external vendor view of a scheduled maintenance task
  * @route GET /api/scheduled-maintenance/public/:publicToken
  * @access Public
- * @param {string} publicToken - Public token from URL params
  */
 const getPublicScheduledMaintenanceView = asyncHandler(async (req, res) => {
-    const { publicToken } = req.params;
+    try {
+        const { publicToken } = req.params;
 
-    const publicViewData = await scheduledMaintenanceService.getPublicScheduledMaintenanceView(publicToken);
+        const publicViewData = await scheduledMaintenanceService.getPublicScheduledMaintenanceView(publicToken);
 
-    res.status(200).json({
-        success: true,
-        data: publicViewData
-    });
+        res.status(200).json({
+            success: true,
+            data: publicViewData
+        });
+    } catch (error) {
+        logger.error(`ScheduledMaintenanceController - Error getting public view: ${error.message}`);
+        throw error;
+    }
 });
 
 /**
  * @desc External vendor updates status/comments for a scheduled maintenance task
  * @route POST /api/scheduled-maintenance/public/:publicToken/update
  * @access Public (limited functionality)
- * @param {string} publicToken - Public token from URL params
- * @body {string} [status] - New status (e.g., 'in_progress', 'completed')
- * @body {string} [commentMessage] - New comment message
- * @body {string} name - Name of the external updater (required)
- * @body {string} phone - Phone of the external updater (required)
  */
 const publicScheduledMaintenanceUpdate = asyncHandler(async (req, res) => {
-    const { publicToken } = req.params;
-    const updateData = req.body; // Includes status, commentMessage, name, phone
-    const ipAddress = req.ip;
+    try {
+        const { publicToken } = req.params;
+        const updateData = req.body; // Includes status, commentMessage, name, phone
+        const ipAddress = req.ip;
 
-    await scheduledMaintenanceService.publicScheduledMaintenanceUpdate(publicToken, updateData, ipAddress);
+        const updatedTask = await scheduledMaintenanceService.publicScheduledMaintenanceUpdate(publicToken, updateData, ipAddress);
 
-    res.status(200).json({
-        success: true,
-        message: 'Scheduled maintenance task updated successfully via public link.'
-    });
+        res.status(200).json({
+            success: true,
+            message: 'Scheduled maintenance task updated successfully via public link.',
+            data: updatedTask
+        });
+    } catch (error) {
+        logger.error(`ScheduledMaintenanceController - Error processing public update: ${error.message}`);
+        throw error;
+    }
+});
+
+/**
+ * @desc Upload media files to a scheduled maintenance task
+ * @route POST /api/scheduled-maintenance/:id/media
+ * @access Private (PropertyManager, Landlord, Admin)
+ */
+const uploadMedia = asyncHandler(async (req, res) => {
+    try {
+        const { id } = req.params;
+        const files = req.files;
+        const currentUser = req.user;
+        const ipAddress = req.ip;
+
+        if (!files || files.length === 0) {
+            throw new AppError('No files provided for upload.', 400);
+        }
+
+        const updatedTask = await scheduledMaintenanceService.uploadMediaToScheduledMaintenance(id, files, currentUser, ipAddress);
+
+        res.status(200).json({
+            success: true,
+            message: 'Media uploaded successfully.',
+            data: updatedTask
+        });
+    } catch (error) {
+        logger.error(`ScheduledMaintenanceController - Error uploading media: ${error.message}`);
+        throw error;
+    }
+});
+
+/**
+ * @desc Delete a media file from a scheduled maintenance task
+ * @route DELETE /api/scheduled-maintenance/:id/media
+ * @access Private (PropertyManager, Landlord, Admin)
+ */
+const deleteMedia = asyncHandler(async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { mediaUrl } = req.body;
+        const currentUser = req.user;
+        const ipAddress = req.ip;
+
+        if (!mediaUrl) {
+            throw new AppError('Media URL is required to delete a file.', 400);
+        }
+
+        const updatedTask = await scheduledMaintenanceService.deleteMediaFromScheduledMaintenance(id, mediaUrl, currentUser, ipAddress);
+
+        res.status(200).json({
+            success: true,
+            message: 'Media deleted successfully.',
+            data: updatedTask
+        });
+    } catch (error) {
+        logger.error(`ScheduledMaintenanceController - Error deleting media: ${error.message}`);
+        throw error;
+    }
+});
+
+/**
+ * @desc Add a comment to a scheduled maintenance task
+ * @route POST /api/scheduled-maintenance/:id/comments
+ * @access Private (with access control)
+ */
+const addComment = asyncHandler(async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { message, isInternalNote } = req.body;
+        const currentUser = req.user;
+        const ipAddress = req.ip;
+
+        if (!message || message.trim() === '') {
+            throw new AppError('Comment message cannot be empty.', 400);
+        }
+
+        const newComment = await scheduledMaintenanceService.addCommentToScheduledMaintenance(
+            id, 
+            message, 
+            !!isInternalNote, 
+            currentUser, 
+            ipAddress
+        );
+
+        res.status(201).json({
+            success: true,
+            message: `${isInternalNote ? 'Internal note' : 'Comment'} added successfully.`,
+            data: newComment
+        });
+    } catch (error) {
+        logger.error(`ScheduledMaintenanceController - Error adding comment: ${error.message}`);
+        throw error;
+    }
+});
+
+/**
+ * @desc Create a maintenance request from a scheduled maintenance task
+ * @route POST /api/scheduled-maintenance/:id/create-request
+ * @access Private (PropertyManager, Landlord, Admin)
+ */
+const createRequest = asyncHandler(async (req, res) => {
+    try {
+        const { id } = req.params;
+        const currentUser = req.user;
+        const ipAddress = req.ip;
+
+        const result = await scheduledMaintenanceService.createRequestFromScheduledMaintenance(id, currentUser, ipAddress);
+
+        res.status(201).json({
+            success: true,
+            message: 'Maintenance request created successfully from scheduled maintenance task.',
+            data: result
+        });
+    } catch (error) {
+        logger.error(`ScheduledMaintenanceController - Error creating request: ${error.message}`);
+        throw error;
+    }
+});
+
+/**
+ * @desc Pause a scheduled maintenance task
+ * @route PUT /api/scheduled-maintenance/:id/pause
+ * @access Private (PropertyManager, Landlord, Admin)
+ */
+const pauseScheduledMaintenance = asyncHandler(async (req, res) => {
+    try {
+        const { id } = req.params;
+        const currentUser = req.user;
+        const ipAddress = req.ip;
+
+        // Create update data for pausing
+        const updateData = {
+            status: 'paused',
+            statusNotes: 'Task paused by user'
+        };
+
+        const updatedTask = await scheduledMaintenanceService.updateScheduledMaintenance(id, updateData, currentUser, ipAddress);
+
+        res.status(200).json({
+            success: true,
+            message: 'Scheduled maintenance task paused successfully.',
+            data: updatedTask
+        });
+    } catch (error) {
+        logger.error(`ScheduledMaintenanceController - Error pausing task: ${error.message}`);
+        throw error;
+    }
+});
+
+/**
+ * @desc Resume a paused scheduled maintenance task
+ * @route PUT /api/scheduled-maintenance/:id/resume
+ * @access Private (PropertyManager, Landlord, Admin)
+ */
+const resumeScheduledMaintenance = asyncHandler(async (req, res) => {
+    try {
+        const { id } = req.params;
+        const currentUser = req.user;
+        const ipAddress = req.ip;
+
+        // Create update data for resuming
+        const updateData = {
+            status: 'scheduled',
+            statusNotes: 'Task resumed by user'
+        };
+
+        const updatedTask = await scheduledMaintenanceService.updateScheduledMaintenance(id, updateData, currentUser, ipAddress);
+
+        res.status(200).json({
+            success: true,
+            message: 'Scheduled maintenance task resumed successfully.',
+            data: updatedTask
+        });
+    } catch (error) {
+        logger.error(`ScheduledMaintenanceController - Error resuming task: ${error.message}`);
+        throw error;
+    }
 });
 
 module.exports = {
@@ -216,4 +430,10 @@ module.exports = {
     disableScheduledMaintenancePublicLink,
     getPublicScheduledMaintenanceView,
     publicScheduledMaintenanceUpdate,
+    uploadMedia,
+    deleteMedia,
+    addComment,
+    createRequest,
+    pauseScheduledMaintenance,
+    resumeScheduledMaintenance
 };

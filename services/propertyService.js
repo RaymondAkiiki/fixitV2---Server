@@ -1,599 +1,1309 @@
 // src/services/propertyService.js
 
+const mongoose = require('mongoose');
 const Property = require('../models/property');
 const User = require('../models/user');
 const Unit = require('../models/unit');
 const PropertyUser = require('../models/propertyUser');
-const Lease = require('../models/lease');
-const Rent = require('../models/rent');
-const Message = require('../models/message');
-const Onboarding = require('../models/onboarding'); 
-const Comment = require('../models/comment'); 
-const Request = require('../models/request'); 
+const Request = require('../models/request');
 const ScheduledMaintenance = require('../models/scheduledMaintenance');
-
-const { createAuditLog } = require('./auditService');
-const { createInAppNotification } = require('./notificationService'); // For notifications
+const Notification = require('../models/notification');
+const Comment = require('../models/comment');
+const auditService = require('./auditService');
+const notificationService = require('./notificationService');
 const logger = require('../utils/logger');
 const AppError = require('../utils/AppError');
 
 const {
-    ROLE_ENUM, // Now an object
+    ROLE_ENUM,
     PROPERTY_USER_ROLES_ENUM,
-    AUDIT_ACTION_ENUM, // Now an object
+    PROPERTY_TYPE_ENUM,
+    AUDIT_ACTION_ENUM,
     AUDIT_RESOURCE_TYPE_ENUM,
-    NOTIFICATION_TYPE_ENUM,
-    LEASE_STATUS_ENUM, // Added for lease status checks
-    UNIT_STATUS_ENUM // Added for unit status updates
+    NOTIFICATION_TYPE_ENUM
 } = require('../utils/constants/enums');
 
-/**
- * Helper to check if a user has management permission for a given property.
- * This is used for landlord/PM/admin roles.
- * @param {object} user - The authenticated user object.
- * @param {string} propertyId - The ID of the property to check access for.
- * @param {Array<string>} requiredRoles - Specific PropertyUser roles required (e.g., ['landlord', 'propertymanager']).
- * @returns {Promise<boolean>} True if authorized, false otherwise.
- */
-const checkPropertyManagementPermission = async (user, propertyId, requiredRoles = [PROPERTY_USER_ROLES_ENUM.LANDLORD, PROPERTY_USER_ROLES_ENUM.PROPERTY_MANAGER, PROPERTY_USER_ROLES_ENUM.ADMIN_ACCESS]) => {
-    if (user.role === ROLE_ENUM.ADMIN) {
-        return true; // Admin has global access
-    }
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 
-    const hasAccess = await PropertyUser.exists({
-        user: user._id,
-        property: propertyId,
-        isActive: true,
-        roles: { $in: requiredRoles }
-    });
-    return hasAccess;
+/**
+ * Helper to check if a user has specified roles for a property
+ * @param {string} userId - User ID
+ * @param {string} propertyId - Property ID
+ * @param {Array<string>} roles - Array of roles to check
+ * @returns {Promise<boolean>} True if user has any of the specified roles
+ */
+const checkUserHasPropertyRoles = async (userId, propertyId, roles) => {
+    try {
+        const propertyUser = await PropertyUser.findOne({
+            user: userId,
+            property: propertyId,
+            isActive: true
+        });
+        
+        if (!propertyUser) return false;
+        
+        // Check if user has any of the specified roles
+        return propertyUser.roles.some(role => roles.includes(role));
+    } catch (error) {
+        logger.error(`PropertyService - Error checking user roles: ${error.message}`, { userId, propertyId });
+        return false; // Fail safely
+    }
 };
 
 /**
- * Creates a new property.
- * @param {object} propertyData - Data for the new property.
- * @param {object} currentUser - The user creating the property.
- * @param {string} ipAddress - IP address of the request.
- * @returns {Promise<Property>} The created property document.
- * @throws {AppError} If validation fails or user not authorized.
+ * Creates a new property
+ * @param {Object} propertyData - Property data
+ * @param {string} propertyData.name - Property name
+ * @param {Object} propertyData.address - Address object
+ * @param {string} [propertyData.propertyType='residential'] - Property type
+ * @param {number} [propertyData.yearBuilt] - Year built
+ * @param {number} [propertyData.numberOfUnits=0] - Number of units
+ * @param {string} [propertyData.details] - Property details
+ * @param {string[]} [propertyData.amenities=[]] - Property amenities
+ * @param {number} [propertyData.annualOperatingBudget=0] - Annual budget
+ * @param {string} [propertyData.notes] - Notes
+ * @param {Object} currentUser - The authenticated user
+ * @param {string} ipAddress - Request IP address
+ * @returns {Promise<Object>} Created property
+ * @throws {AppError} If validation fails
  */
 const createProperty = async (propertyData, currentUser, ipAddress) => {
-    const { name, address, propertyType, yearBuilt, numberOfUnits, details, annualOperatingBudget, notes, mainContactUser } = propertyData;
-
-    // Authorization: Only Landlords, Property Managers, and Admins can create properties.
-    // This is also handled by route middleware, but a double-check here for robustness.
-    if (![ROLE_ENUM.LANDLORD, ROLE_ENUM.PROPERTY_MANAGER, ROLE_ENUM.ADMIN].includes(currentUser.role)) {
-        throw new AppError('You are not authorized to create properties.', 403);
-    }
-
-    // Ensure mainContactUser exists if provided
-    if (mainContactUser) {
-        const contactUserExists = await User.exists({ _id: mainContactUser });
-        if (!contactUserExists) {
-            throw new AppError('Main contact user not found.', 404);
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    
+    try {
+        // Check if property with same name already exists
+        const existingProperty = await Property.findOne({ 
+            name: propertyData.name 
+        }).session(session);
+        
+        if (existingProperty) {
+            throw new AppError(`Property with name "${propertyData.name}" already exists.`, 400);
         }
-    }
-
-    const newProperty = new Property({
-        name,
-        address,
-        propertyType,
-        yearBuilt,
-        numberOfUnits,
-        details,
-        annualOperatingBudget,
-        notes,
-        mainContactUser,
-        createdBy: currentUser._id,
-        isActive: true // Default to active
-    });
-
-    const createdProperty = await newProperty.save();
-
-    // After creating property, link the creator to it via PropertyUser model
-    // The creator becomes a 'landlord' if they are a landlord, or 'propertymanager' if they are a PM.
-    let roleForCreator = currentUser.role;
-    if (roleForCreator === ROLE_ENUM.ADMIN) {
-        // Admins might not be the primary landlord/PM, but are linked for management access.
-        // Assign them as a property manager by default on this property.
-        roleForCreator = PROPERTY_USER_ROLES_ENUM.PROPERTY_MANAGER; // Changed to use PROPERTY_USER_ROLES_ENUM
-    }
-
-    await PropertyUser.create({
-        user: currentUser._id,
-        property: createdProperty._id,
-        roles: [roleForCreator], // Assign initial role on this property
-        invitedBy: currentUser._id, // Self-invited
-        isActive: true,
-        startDate: new Date(),
-    });
-
-    await createAuditLog({
-        action: AUDIT_ACTION_ENUM.CREATE, // Correctly uses CREATE from object enum
-        user: currentUser._id,
-        resourceType: AUDIT_RESOURCE_TYPE_ENUM.Property,
-        resourceId: createdProperty._id,
-        newValue: createdProperty.toObject(),
-        ipAddress: ipAddress,
-        description: `Property "${createdProperty.name}" created by ${currentUser.email}.`,
-        status: 'success'
-    });
-
-    logger.info(`PropertyService: Property "${createdProperty.name}" created by ${currentUser.email}.`);
-    return createdProperty;
-};
-
-/**
- * Gets all properties accessible by the logged-in user with filtering and pagination.
- * @param {object} currentUser - The authenticated user.
- * @param {object} filters - Query filters (search, city, country, isActive, propertyType, sortBy, sortOrder, page, limit).
- * @returns {Promise<object>} Object containing properties array, total count, page, and limit.
- * @throws {AppError} If user not authorized.
- */
-const getAllProperties = async (currentUser, filters) => {
-    let query = {};
-    const page = parseInt(filters.page) || 1;
-    const limit = parseInt(filters.limit) || 10;
-    const skip = (page - 1) * limit;
-
-    // Base filtering based on user role
-    if (currentUser.role === ROLE_ENUM.ADMIN) {
-        // Admin sees all
-    } else {
-        // For other roles, find properties associated with the current user via PropertyUser model
-        const associatedPropertyUsers = await PropertyUser.find({ user: currentUser._id, isActive: true }).distinct('property');
-
-        if (associatedPropertyUsers.length === 0) {
-            return { properties: [], total: 0, page, limit };
+        
+        // Create property
+        const newProperty = new Property({
+            name: propertyData.name,
+            address: propertyData.address,
+            propertyType: propertyData.propertyType || 'residential',
+            yearBuilt: propertyData.yearBuilt,
+            numberOfUnits: propertyData.numberOfUnits || 0,
+            details: propertyData.details,
+            amenities: propertyData.amenities || [],
+            annualOperatingBudget: propertyData.annualOperatingBudget || 0,
+            notes: propertyData.notes,
+            isActive: true
+        });
+        
+        const createdProperty = await newProperty.save({ session });
+        
+        // Create PropertyUser association for the creator
+        // Default role depends on the user's global role
+        let creatorRole;
+        if (currentUser.role === ROLE_ENUM.ADMIN) {
+            creatorRole = PROPERTY_USER_ROLES_ENUM.ADMIN_ACCESS;
+        } else if (currentUser.role === ROLE_ENUM.LANDLORD) {
+            creatorRole = PROPERTY_USER_ROLES_ENUM.LANDLORD;
+        } else if (currentUser.role === ROLE_ENUM.PROPERTY_MANAGER) {
+            creatorRole = PROPERTY_USER_ROLES_ENUM.PROPERTY_MANAGER;
+        } else {
+            creatorRole = PROPERTY_USER_ROLES_ENUM.ADMIN_ACCESS; // Fallback
         }
-        query._id = { $in: associatedPropertyUsers };
-    }
-
-    // Apply additional filters from query parameters
-    if (filters.search) {
-        query.name = { $regex: filters.search, $options: 'i' };
-    }
-    if (filters.city) {
-        query['address.city'] = { $regex: filters.city, $options: 'i' };
-    }
-    if (filters.country) {
-        query['address.country'] = { $regex: filters.country, $options: 'i' };
-    }
-    if (filters.isActive !== undefined) {
-        query.isActive = filters.isActive === 'true'; // Convert string to boolean
-    }
-    if (filters.propertyType) {
-        query.propertyType = filters.propertyType.toLowerCase();
-    }
-
-    const sortBy = filters.sortBy || 'name';
-    const sortOrder = filters.sortOrder === 'desc' ? -1 : 1;
-    const sortOptions = { [sortBy]: sortOrder };
-
-    const properties = await Property.find(query)
-        .populate('units', 'unitName status') // Populate basic unit info
-        .populate('createdBy', 'firstName lastName email') // Populate creator
-        .populate('mainContactUser', 'firstName lastName email') // Populate main contact
-        .sort(sortOptions)
-        .limit(limit)
-        .skip(skip);
-
-    const total = await Property.countDocuments(query);
-
-    await createAuditLog({
-        action: AUDIT_ACTION_ENUM.FETCH_ALL_PROPERTIES, // Changed from READ_ALL
-        user: currentUser._id,
-        resourceType: AUDIT_RESOURCE_TYPE_ENUM.Property,
-        ipAddress: currentUser.ip, // Ensure currentUser.ip is populated by middleware
-        description: `User ${currentUser.email} fetched list of properties.`,
-        status: 'success',
-        metadata: { filters }
-    });
-
-    return { properties, total, page, limit };
-};
-
-/**
- * Gets a single property by ID, including associated users.
- * @param {string} propertyId - The ID of the property.
- * @param {object} currentUser - The authenticated user.
- * @returns {Promise<object>} The property document with associated users.
- * @throws {AppError} If property not found or user not authorized.
- */
-const getPropertyById = async (propertyId, currentUser) => {
-    const property = await Property.findById(propertyId)
-        .populate('units') // Populate units details
-        .populate('createdBy', 'firstName lastName email') // Populate who created the property
-        .populate('mainContactUser', 'firstName lastName email'); // Populate main contact user
-
-    if (!property) {
-        throw new AppError('Property not found.', 404);
-    }
-
-    // Authorization: Admin can view any property. Others must be associated.
-    // Enhanced requiredRoles to include TENANT for viewing their associated properties.
-    const isAuthorized = await checkPropertyManagementPermission(currentUser, propertyId, [
-        PROPERTY_USER_ROLES_ENUM.LANDLORD,
-        PROPERTY_USER_ROLES_ENUM.PROPERTY_MANAGER,
-        PROPERTY_USER_ROLES_ENUM.TENANT, // Tenants can view their associated properties
-        PROPERTY_USER_ROLES_ENUM.ADMIN_ACCESS // For users with admin-like access on a property
-    ]);
-
-    if (!isAuthorized) {
-        throw new AppError('Not authorized to view this property.', 403);
-    }
-
-    // Optionally, fetch and include details about associated Landlords, PMs, Tenants via PropertyUser
-    const associatedUsers = await PropertyUser.find({ property: propertyId, isActive: true })
-        .populate('user', 'firstName lastName email role'); // Populate user details
-
-    const landlords = associatedUsers.filter(au => au.roles.includes(PROPERTY_USER_ROLES_ENUM.LANDLORD)).map(au => au.user);
-    const propertyManagers = associatedUsers.filter(au => au.roles.includes(PROPERTY_USER_ROLES_ENUM.PROPERTY_MANAGER)).map(au => au.user);
-    const tenants = associatedUsers.filter(au => au.roles.includes(PROPERTY_USER_ROLES_ENUM.TENANT)).map(au => ({ user: au.user, unit: au.unit })); // Include unit for tenants
-
-    await createAuditLog({
-        action: AUDIT_ACTION_ENUM.READ_ONE_PROPERTY, // Changed from READ
-        user: currentUser._id,
-        resourceType: AUDIT_RESOURCE_TYPE_ENUM.Property,
-        resourceId: property._id,
-        ipAddress: currentUser.ip, // Ensure currentUser.ip is populated by middleware
-        description: `User ${currentUser.email} fetched property ${property.name}.`,
-        status: 'success'
-    });
-
-    return {
-        ...property.toObject(),
-        landlords,
-        propertyManagers,
-        tenants,
-    };
-};
-
-/**
- * Updates a property's details.
- * @param {string} propertyId - The ID of the property to update.
- * @param {object} updateData - Data to update the property with.
- * @param {object} currentUser - The user performing the update.
- * @param {string} ipAddress - IP address of the request.
- * @returns {Promise<Property>} The updated property document.
- * @throws {AppError} If property not found, user not authorized, or validation fails.
- */
-const updateProperty = async (propertyId, updateData, currentUser, ipAddress) => {
-    let property = await Property.findById(propertyId);
-    if (!property) {
-        throw new AppError('Property not found.', 404);
-    }
-
-    // Authorization: Only Admin, or Landlord/PM associated with this property can update
-    const isAuthorized = await checkPropertyManagementPermission(currentUser, propertyId, [
-        PROPERTY_USER_ROLES_ENUM.LANDLORD,
-        PROPERTY_USER_ROLES_ENUM.PROPERTY_MANAGER,
-        PROPERTY_USER_ROLES_ENUM.ADMIN_ACCESS
-    ]);
-
-    if (!isAuthorized) {
-        throw new AppError('Not authorized to update this property.', 403);
-    }
-
-    const oldProperty = property.toObject(); // Capture old state for audit log
-
-    // Apply updates to the property document
-    Object.assign(property, updateData);
-    const updatedProperty = await property.save();
-
-    await createAuditLog({
-        action: AUDIT_ACTION_ENUM.UPDATE, // Correctly uses UPDATE from object enum
-        user: currentUser._id,
-        resourceType: AUDIT_RESOURCE_TYPE_ENUM.Property,
-        resourceId: updatedProperty._id,
-        oldValue: oldProperty,
-        newValue: updatedProperty.toObject(),
-        ipAddress: ipAddress,
-        description: `Property "${updatedProperty.name}" updated by ${currentUser.email}.`,
-        status: 'success'
-    });
-
-    logger.info(`PropertyService: Property "${updatedProperty.name}" updated by ${currentUser.email}.`);
-    return updatedProperty;
-};
-
-/**
- * Deletes a property and all its associated data (cascade delete).
- * @param {string} propertyId - The ID of the property to delete.
- * @param {object} currentUser - The user performing the deletion.
- * @param {string} ipAddress - IP address of the request.
- * @returns {Promise<void>}
- * @throws {AppError} If property not found, user not authorized, or has active dependents.
- */
-const deleteProperty = async (propertyId, currentUser, ipAddress) => {
-    const property = await Property.findById(propertyId);
-    if (!property) {
-        throw new AppError('Property not found.', 404);
-    }
-
-    // Authorization: Only Admin can delete. Landlords can delete their own properties.
-    const isAuthorized = await checkPropertyManagementPermission(currentUser, propertyId, [PROPERTY_USER_ROLES_ENUM.LANDLORD, PROPERTY_USER_ROLES_ENUM.ADMIN_ACCESS]);
-    if (!isAuthorized) {
-        throw new AppError('Not authorized to delete this property.', 403);
-    }
-
-    const oldProperty = property.toObject(); // Capture old state for audit log
-
-    // IMPORTANT: Before deleting, check for active dependents that prevent deletion.
-    // This prevents accidental data loss and maintains data integrity.
-    const activeLeasesCount = await Lease.countDocuments({ property: propertyId, status: LEASE_STATUS_ENUM.find(s => s === 'active') });
-    if (activeLeasesCount > 0) {
-        throw new AppError('Cannot delete property with active leases. Please terminate them first.', 400);
-    }
-
-    // --- Cascade Delete (ORDER MATTERS for dependencies) ---
-    // Delete associated data in an order that respects foreign key dependencies where applicable.
-    // 1. Delete all Rents associated with units of this property (or directly by property if Rent model supported it)
-    const unitsInProperty = await Unit.find({ property: propertyId }).select('_id');
-    const unitIds = unitsInProperty.map(unit => unit._id);
-    if (unitIds.length > 0) {
-        await Rent.deleteMany({ unit: { $in: unitIds } });
-        logger.info(`PropertyService: Deleted ${unitIds.length} units' rent records for property ${propertyId}.`);
-    }
-
-    // 2. Delete all Leases associated with this property
-    await Lease.deleteMany({ property: propertyId });
-    logger.info(`PropertyService: Deleted leases for property ${propertyId}.`);
-
-    // 3. Delete all Requests associated with this property or its units
-    await Request.deleteMany({ $or: [{ property: propertyId }, { unit: { $in: unitIds } }] });
-    logger.info(`PropertyService: Deleted requests for property ${propertyId}.`);
-
-    // 4. Delete all ScheduledMaintenance associated with this property or its units
-    await ScheduledMaintenance.deleteMany({ $or: [{ property: propertyId }, { unit: { $in: unitIds } }] });
-    logger.info(`PropertyService: Deleted scheduled maintenance for property ${propertyId}.`);
-
-    // 5. Delete all Comments associated with this property or its units/requests/scheduled maintenance
-    // This is complex due to `contextType` and `contextId`. Simpler to delete comments related to the property itself.
-    // For comments related to requests/scheduled maintenance, they are implicitly deleted when those resources are deleted.
-    await Comment.deleteMany({ contextType: AUDIT_RESOURCE_TYPE_ENUM.Property, contextId: propertyId });
-    logger.info(`PropertyService: Deleted direct property comments for property ${propertyId}.`);
-
-    // 6. Delete all Messages related to this property or its units
-    await Message.deleteMany({ $or: [{ property: propertyId }, { unit: { $in: unitIds } }] });
-    logger.info(`PropertyService: Deleted messages for property ${propertyId}.`);
-
-    // 7. Delete all Onboarding materials related to this property or its units
-    await Onboarding.deleteMany({ $or: [{ property: propertyId }, { unit: { $in: unitIds } }] });
-    logger.info(`PropertyService: Deleted onboarding materials for property ${propertyId}.`);
-
-    // 8. Delete all PropertyUser associations for this property
-    await PropertyUser.deleteMany({ property: propertyId });
-    logger.info(`PropertyService: Deleted PropertyUser associations for property ${propertyId}.`);
-
-    // 9. Delete all Units belonging to this property
-    await Unit.deleteMany({ property: propertyId });
-    logger.info(`PropertyService: Deleted units for property ${propertyId}.`);
-
-    // 10. Finally, delete the property itself
-    await property.deleteOne();
-
-    await createAuditLog({
-        action: AUDIT_ACTION_ENUM.DELETE, // Correctly uses DELETE from object enum
-        user: currentUser._id,
-        resourceType: AUDIT_RESOURCE_TYPE_ENUM.Property,
-        resourceId: propertyId,
-        oldValue: oldProperty,
-        newValue: null,
-        ipAddress: ipAddress,
-        description: `Property "${oldProperty.name}" and all its associated data deleted by ${currentUser.email}.`,
-        status: 'success'
-    });
-
-    logger.info(`PropertyService: Property "${oldProperty.name}" deleted by ${currentUser.email}.`);
-};
-
-/**
- * Assigns a user to a property with specific roles.
- * This is a generic assignment function, replacing assign/remove PM/Tenant.
- * @param {string} propertyId - The ID of the property.
- * @param {string} userIdToAssign - The ID of the user to assign.
- * @param {Array<string>} roles - An array of roles to assign (e.g., ['propertymanager'], ['tenant']).
- * @param {string} [unitId=null] - Optional. The ID of the unit if assigning a tenant.
- * @param {object} currentUser - The user performing the assignment.
- * @param {string} ipAddress - IP address of the request.
- * @returns {Promise<PropertyUser>} The created or updated PropertyUser document.
- * @throws {AppError} If property/user/unit not found, user not authorized, or assignment conflict.
- */
-const assignUserToProperty = async (propertyId, userIdToAssign, roles, unitId = null, currentUser, ipAddress) => {
-    const property = await Property.findById(propertyId);
-    if (!property) {
-        throw new AppError('Property not found.', 404);
-    }
-
-    const userToAssign = await User.findById(userIdToAssign);
-    if (!userToAssign) {
-        throw new AppError('User to assign not found.', 404);
-    }
-
-    // Authorization: Only Admin or Landlord of the property can assign users.
-    const isAuthorized = await checkPropertyManagementPermission(currentUser, propertyId, [PROPERTY_USER_ROLES_ENUM.LANDLORD, PROPERTY_USER_ROLES_ENUM.ADMIN_ACCESS]);
-    if (!isAuthorized) {
-        throw new AppError('Not authorized to assign users to this property.', 403);
-    }
-
-    // Validate roles and unitId for 'tenant' role
-    if (roles.includes(PROPERTY_USER_ROLES_ENUM.TENANT)) {
-        if (!unitId) {
-            throw new AppError('Unit ID is required when assigning a tenant.', 400);
-        }
-        const unit = await Unit.findById(unitId);
-        if (!unit || !unit.property.equals(propertyId)) {
-            throw new AppError('Unit not found or does not belong to the specified property.', 404);
-        }
-        // Check if unit has an active lease (if assigning a tenant via this method, it should ideally be vacant)
-        const activeLeaseForUnit = await Lease.findOne({ unit: unitId, status: LEASE_STATUS_ENUM.find(s => s === 'active') });
-        if (activeLeaseForUnit) {
-            throw new AppError('Unit is currently occupied by an active lease. Terminate existing lease first.', 409);
-        }
-    } else if (unitId) {
-        // If roles are not tenant, unitId should not be provided or should be null
-        throw new AppError('Unit ID should only be provided when assigning a tenant role.', 400);
-    }
-
-    // Find existing association
-    let assignment = await PropertyUser.findOne({
-        user: userIdToAssign,
-        property: propertyId,
-        unit: unitId // Important: include unitId in query for tenant roles
-    });
-
-    let actionType = AUDIT_ACTION_ENUM.CREATE;
-    let description = `User ${userToAssign.email} assigned to property ${property.name} with roles ${roles.join(', ')} by ${currentUser.email}.`;
-    let oldValue = null;
-    let newValue = null;
-
-    if (assignment) {
-        oldValue = assignment.toObject();
-        // If roles are already present and active, conflict
-        const existingActiveRoles = assignment.roles.filter(r => roles.includes(r));
-        if (assignment.isActive && existingActiveRoles.length === roles.length) {
-            throw new AppError(`User is already assigned with the specified active roles for this property/unit.`, 409);
-        }
-
-        // Update existing assignment
-        assignment.roles = [...new Set([...assignment.roles, ...roles])]; // Add new roles, avoid duplicates
-        assignment.isActive = true; // Reactivate if it was inactive
-        assignment.endDate = null; // Clear end date if reactivating
-        assignment.invitedBy = currentUser._id; // Update invitedBy
-        newValue = assignment.toObject();
-        actionType = AUDIT_ACTION_ENUM.UPDATE;
-        description = `User ${userToAssign.email} roles updated/reactivated for property ${property.name} by ${currentUser.email}.`;
-    } else {
-        // Create new assignment
-        assignment = new PropertyUser({
-            user: userIdToAssign,
-            property: propertyId,
-            unit: unitId,
-            roles,
-            invitedBy: currentUser._id,
+        
+        const propertyUser = await PropertyUser.create([{
+            user: currentUser._id,
+            property: createdProperty._id,
+            roles: [creatorRole],
             isActive: true,
             startDate: new Date(),
+            invitedBy: currentUser._id
+        }], { session });
+        
+        // Update property with the creator's PropertyUser reference
+        createdProperty.createdByPropertyUser = propertyUser[0]._id;
+        await createdProperty.save({ session });
+        
+        // Create audit log
+        await auditService.logActivity(
+            AUDIT_ACTION_ENUM.CREATE,
+            AUDIT_RESOURCE_TYPE_ENUM.Property,
+            createdProperty._id,
+            {
+                userId: currentUser._id,
+                ipAddress,
+                description: `Property "${createdProperty.name}" created by ${currentUser.email}.`,
+                status: 'success',
+                metadata: {
+                    propertyType: createdProperty.propertyType,
+                    location: `${createdProperty.address.city}, ${createdProperty.address.country}`
+                },
+                newValue: createdProperty.toObject()
+            },
+            { session }
+        );
+        
+        // If property manager or landlord is specified and different from creator, create that association
+        if (propertyData.mainContactUser && 
+            propertyData.mainContactUser !== currentUser._id.toString()) {
+            const mainContact = await User.findById(propertyData.mainContactUser).session(session);
+            
+            if (mainContact) {
+                // Determine appropriate role based on the contact's global role
+                let contactRole;
+                if (mainContact.role === ROLE_ENUM.LANDLORD) {
+                    contactRole = PROPERTY_USER_ROLES_ENUM.LANDLORD;
+                } else if (mainContact.role === ROLE_ENUM.PROPERTY_MANAGER) {
+                    contactRole = PROPERTY_USER_ROLES_ENUM.PROPERTY_MANAGER;
+                } else {
+                    contactRole = PROPERTY_USER_ROLES_ENUM.ADMIN_ACCESS;
+                }
+                
+                await PropertyUser.create([{
+                    user: mainContact._id,
+                    property: createdProperty._id,
+                    roles: [contactRole],
+                    isActive: true,
+                    startDate: new Date(),
+                    invitedBy: currentUser._id
+                }], { session });
+                
+                // Send notification to the main contact
+                try {
+                    await notificationService.sendNotification({
+                        recipientId: mainContact._id,
+                        type: NOTIFICATION_TYPE_ENUM.PROPERTY_ASSIGNED,
+                        message: `You have been assigned as ${contactRole} for property "${createdProperty.name}".`,
+                        link: `${FRONTEND_URL}/properties/${createdProperty._id}`,
+                        relatedResourceType: AUDIT_RESOURCE_TYPE_ENUM.Property,
+                        relatedResourceId: createdProperty._id,
+                        emailDetails: {
+                            subject: `New Property Assignment: ${createdProperty.name}`,
+                            html: `
+                                <p>Hello ${mainContact.firstName},</p>
+                                <p>You have been assigned as ${contactRole} for property "${createdProperty.name}" located in ${createdProperty.address.city}, ${createdProperty.address.country}.</p>
+                                <p><a href="${FRONTEND_URL}/properties/${createdProperty._id}">View Property Details</a></p>
+                            `,
+                            text: `Hello ${mainContact.firstName}, You have been assigned as ${contactRole} for property "${createdProperty.name}" located in ${createdProperty.address.city}, ${createdProperty.address.country}. View details at: ${FRONTEND_URL}/properties/${createdProperty._id}`
+                        },
+                        senderId: currentUser._id
+                    }, { session });
+                } catch (notificationError) {
+                    logger.warn(`Failed to send property assignment notification: ${notificationError.message}`);
+                    // Continue even if notification fails
+                }
+            }
+        }
+        
+        await session.commitTransaction();
+        
+        logger.info(`PropertyService: Property "${createdProperty.name}" created by ${currentUser.email}.`);
+        
+        // Return populated property
+        return Property.findById(createdProperty._id)
+            .populate({
+                path: 'createdByPropertyUser',
+                populate: {
+                    path: 'user',
+                    select: 'firstName lastName email'
+                }
+            });
+    } catch (error) {
+        await session.abortTransaction();
+        
+        logger.error(`PropertyService - Error creating property: ${error.message}`, {
+            userId: currentUser?._id,
+            propertyName: propertyData?.name
         });
-        newValue = assignment.toObject();
+        
+        throw error instanceof AppError ? error : new AppError(`Failed to create property: ${error.message}`, 500);
+    } finally {
+        session.endSession();
     }
-
-    const savedAssignment = await assignment.save();
-
-    // If assigning a tenant, update unit status
-    if (roles.includes(PROPERTY_USER_ROLES_ENUM.TENANT) && unitId) {
-        await Unit.findByIdAndUpdate(unitId, { status: UNIT_STATUS_ENUM.find(s => s === 'occupied') });
-        logger.info(`PropertyService: Unit ${unitId} status updated to occupied.`);
-    }
-
-    await createAuditLog({
-        action: actionType,
-        user: currentUser._id,
-        resourceType: AUDIT_RESOURCE_TYPE_ENUM.PropertyUser,
-        resourceId: savedAssignment._id,
-        oldValue: oldValue,
-        newValue: newValue,
-        ipAddress: ipAddress,
-        description: description,
-        status: 'success'
-    });
-
-    logger.info(`PropertyService: ${description}`);
-    return savedAssignment;
 };
 
 /**
- * Removes (deactivates) a user's association with a property/unit for specific roles.
- * @param {string} propertyId - The ID of the property.
- * @param {string} userIdToRemove - The ID of the user to remove.
- * @param {Array<string>} rolesToRemove - An array of roles to remove (e.g., ['propertymanager'], ['tenant']).
- * @param {string} [unitId=null] - Optional. The ID of the unit if removing a tenant.
- * @param {object} currentUser - The user performing the removal.
- * @param {string} ipAddress - IP address of the request.
- * @returns {Promise<void>}
- * @throws {AppError} If property/user/association not found, user not authorized, or has active dependents.
+ * Gets all properties accessible by a user with filtering and pagination
+ * @param {Object} currentUser - The authenticated user
+ * @param {Object} filters - Query filters
+ * @param {string} [filters.search] - Search term
+ * @param {string} [filters.city] - Filter by city
+ * @param {string} [filters.country] - Filter by country
+ * @param {boolean} [filters.isActive] - Filter by active status
+ * @param {string} [filters.propertyType] - Filter by property type
+ * @param {string} [filters.sortBy='name'] - Sort field
+ * @param {string} [filters.sortOrder='asc'] - Sort order
+ * @param {number} [filters.page=1] - Page number
+ * @param {number} [filters.limit=10] - Items per page
+ * @returns {Promise<Object>} Paginated properties
+ * @throws {AppError} If filtering or pagination fails
  */
-const removeUserFromProperty = async (propertyId, userIdToRemove, rolesToRemove, unitId = null, currentUser, ipAddress) => {
-    const property = await Property.findById(propertyId);
-    if (!property) {
-        throw new AppError('Property not found.', 404);
-    }
-
-    const userToRemove = await User.findById(userIdToRemove);
-    if (!userToRemove) {
-        throw new AppError('User to remove not found.', 404);
-    }
-
-    // Authorization: Only Admin or Landlord of the property can remove users.
-    const isAuthorized = await checkPropertyManagementPermission(currentUser, propertyId, [PROPERTY_USER_ROLES_ENUM.LANDLORD, PROPERTY_USER_ROLES_ENUM.ADMIN_ACCESS]);
-    if (!isAuthorized) {
-        throw new AppError('Not authorized to remove users from this property.', 403);
-    }
-
-    // Find the specific assignment
-    const query = {
-        user: userIdToRemove,
-        property: propertyId,
-        roles: { $in: rolesToRemove }
-    };
-    if (unitId) {
-        query.unit = unitId;
-    }
-
-    const assignment = await PropertyUser.findOne(query);
-
-    if (!assignment || !assignment.isActive) {
-        throw new AppError(`User is not actively assigned with the specified roles for this property/unit.`, 404);
-    }
-
-    const oldAssignment = assignment.toObject(); // Capture old state for audit log
-
-    // Prevent removal if active leases exist for tenants
-    if (rolesToRemove.includes(PROPERTY_USER_ROLES_ENUM.TENANT) && unitId) {
-        const activeLease = await Lease.findOne({ tenant: userIdToRemove, unit: unitId, status: LEASE_STATUS_ENUM.find(s => s === 'active') });
-        if (activeLease) {
-            throw new AppError('Cannot remove tenant with an active lease for this unit. Terminate lease first.', 400);
+const getAllProperties = async (currentUser, filters) => {
+    try {
+        // Parse pagination params
+        const page = parseInt(filters.page) || 1;
+        const limit = parseInt(filters.limit) || 10;
+        const skip = (page - 1) * limit;
+        
+        // Start with base query
+        let query = {};
+        
+        // Apply access control based on user role
+        if (currentUser.role === ROLE_ENUM.ADMIN) {
+            // Admin can see all properties
+        } else {
+            // Other roles can only see properties they're associated with
+            const userPropertyIds = await PropertyUser.find({
+                user: currentUser._id,
+                isActive: true
+            }).distinct('property');
+            
+            if (userPropertyIds.length === 0) {
+                return {
+                    properties: [],
+                    total: 0,
+                    page,
+                    limit
+                };
+            }
+            
+            query._id = { $in: userPropertyIds };
         }
-    }
-
-    // Remove specified roles from the assignment
-    assignment.roles = assignment.roles.filter(role => !rolesToRemove.includes(role));
-
-    // If no roles remain, or if the specific tenant role is removed from a unit-specific assignment, deactivate the association
-    if (assignment.roles.length === 0 || (rolesToRemove.includes(PROPERTY_USER_ROLES_ENUM.TENANT) && unitId)) {
-        assignment.isActive = false;
-        assignment.endDate = new Date();
-    }
-
-    const savedAssignment = await assignment.save();
-
-    // If a tenant was removed and no other active tenants/leases for the unit, update unit status to vacant
-    if (rolesToRemove.includes(PROPERTY_USER_ROLES_ENUM.TENANT) && unitId) {
-        const remainingActiveTenants = await PropertyUser.countDocuments({ unit: unitId, roles: PROPERTY_USER_ROLES_ENUM.TENANT, isActive: true });
-        const remainingActiveLeases = await Lease.countDocuments({ unit: unitId, status: LEASE_STATUS_ENUM.find(s => s === 'active') });
-
-        if (remainingActiveTenants === 0 && remainingActiveLeases === 0) {
-            await Unit.findByIdAndUpdate(unitId, { status: UNIT_STATUS_ENUM.find(s => s === 'vacant') });
-            logger.info(`PropertyService: Unit ${unitId} status updated to vacant after tenant removal.`);
+        
+        // Apply filters
+        if (filters.isActive !== undefined) {
+            query.isActive = filters.isActive === 'true' || filters.isActive === true;
         }
+        
+        if (filters.propertyType) {
+            if (!PROPERTY_TYPE_ENUM.includes(filters.propertyType.toLowerCase())) {
+                throw new AppError(`Invalid property type: ${filters.propertyType}. Allowed values: ${PROPERTY_TYPE_ENUM.join(', ')}`, 400);
+            }
+            query.propertyType = filters.propertyType.toLowerCase();
+        }
+        
+        if (filters.city) {
+            query['address.city'] = { $regex: new RegExp(filters.city, 'i') };
+        }
+        
+        if (filters.country) {
+            query['address.country'] = { $regex: new RegExp(filters.country, 'i') };
+        }
+        
+        if (filters.search) {
+            query.$or = [
+                { name: { $regex: new RegExp(filters.search, 'i') } },
+                { 'address.street': { $regex: new RegExp(filters.search, 'i') } },
+                { 'address.city': { $regex: new RegExp(filters.search, 'i') } },
+                { 'address.zipCode': { $regex: new RegExp(filters.search, 'i') } }
+            ];
+        }
+        
+        // Set up sorting
+        const sortBy = filters.sortBy || 'name';
+        const sortOrder = filters.sortOrder === 'desc' ? -1 : 1;
+        const sort = { [sortBy]: sortOrder };
+        
+        // Count total matching properties
+        const total = await Property.countDocuments(query);
+        
+        // Execute query with pagination
+        const properties = await Property.find(query)
+            .sort(sort)
+            .skip(skip)
+            .limit(limit)
+            .populate({
+                path: 'createdByPropertyUser',
+                populate: {
+                    path: 'user',
+                    select: 'firstName lastName email'
+                }
+            });
+        
+        // Augment properties with user role info
+        const propertiesWithRoles = await Promise.all(properties.map(async property => {
+            const userRoles = await PropertyUser.findOne({
+                user: currentUser._id,
+                property: property._id,
+                isActive: true
+            }).select('roles');
+            
+            const propertyObj = property.toObject();
+            propertyObj.userRoles = userRoles ? userRoles.roles : [];
+            
+            // Add unit count
+            propertyObj.unitCount = propertyObj.units ? propertyObj.units.length : 0;
+            
+            return propertyObj;
+        }));
+        
+        // Log access
+        await auditService.logActivity(
+            AUDIT_ACTION_ENUM.READ_ALL,
+            AUDIT_RESOURCE_TYPE_ENUM.Property,
+            null,
+            {
+                userId: currentUser._id,
+                description: `User ${currentUser.email} fetched list of properties.`,
+                status: 'success',
+                metadata: { filters, page, limit }
+            }
+        );
+        
+        return {
+            properties: propertiesWithRoles,
+            total,
+            page,
+            limit
+        };
+    } catch (error) {
+        logger.error(`PropertyService - Error getting properties: ${error.message}`, {
+            userId: currentUser?._id,
+            filters
+        });
+        
+        throw error instanceof AppError ? error : new AppError(`Failed to get properties: ${error.message}`, 500);
     }
-
-    await createAuditLog({
-        action: AUDIT_ACTION_ENUM.UPDATE, // Considered an update to the association
-        user: currentUser._id,
-        resourceType: AUDIT_RESOURCE_TYPE_ENUM.PropertyUser,
-        resourceId: savedAssignment._id,
-        oldValue: oldAssignment,
-        newValue: savedAssignment.toObject(),
-        ipAddress: ipAddress,
-        description: `User ${userToRemove.email} removed from property ${property.name} for roles ${rolesToRemove.join(', ')} by ${currentUser.email}.`,
-        status: 'success'
-    });
-
-    logger.info(`PropertyService: User ${userToRemove.email} removed from property ${property.name} for roles ${rolesToRemove.join(', ')}.`);
-    return savedAssignment;
 };
 
+/**
+ * Gets a specific property by ID with details
+ * @param {string} propertyId - Property ID
+ * @param {Object} currentUser - The authenticated user
+ * @returns {Promise<Object>} Property details with associations
+ * @throws {AppError} If property not found or unauthorized
+ */
+const getPropertyById = async (propertyId, currentUser) => {
+    try {
+        // Find property
+        const property = await Property.findById(propertyId)
+            .populate({
+                path: 'createdByPropertyUser',
+                populate: {
+                    path: 'user',
+                    select: 'firstName lastName email'
+                }
+            })
+            .populate({
+                path: 'units',
+                options: { sort: { unitName: 1 } }
+            });
+        
+        if (!property) {
+            throw new AppError('Property not found.', 404);
+        }
+        
+        // Check authorization
+        if (currentUser.role !== ROLE_ENUM.ADMIN) {
+            const isAssociated = await PropertyUser.exists({
+                user: currentUser._id,
+                property: propertyId,
+                isActive: true
+            });
+            
+            if (!isAssociated) {
+                throw new AppError('You do not have access to this property.', 403);
+            }
+        }
+        
+        // Get current user's roles for this property
+        const userRoles = await PropertyUser.findOne({
+            user: currentUser._id,
+            property: propertyId,
+            isActive: true
+        }).select('roles');
+        
+        // Get property managers and landlords
+        const propertyManagers = await PropertyUser.find({
+            property: propertyId,
+            roles: PROPERTY_USER_ROLES_ENUM.PROPERTY_MANAGER,
+            isActive: true
+        }).populate('user', 'firstName lastName email phone avatar');
+        
+        const landlords = await PropertyUser.find({
+            property: propertyId,
+            roles: PROPERTY_USER_ROLES_ENUM.LANDLORD,
+            isActive: true
+        }).populate('user', 'firstName lastName email phone avatar');
+        
+        // Get active maintenance requests for this property
+        const activeRequests = await Request.find({
+            property: propertyId,
+            status: { $nin: ['completed', 'cancelled'] }
+        })
+            .select('title status priority createdAt')
+            .sort({ createdAt: -1 })
+            .limit(5);
+        
+        // Get upcoming scheduled maintenance
+        const upcomingMaintenance = await ScheduledMaintenance.find({
+            property: propertyId,
+            status: { $nin: ['completed', 'cancelled'] }
+        })
+            .select('title status scheduledDate createdAt')
+            .sort({ scheduledDate: 1 })
+            .limit(5);
+        
+        // Enhance property object with additional data
+        const propertyData = property.toObject();
+        propertyData.userRoles = userRoles ? userRoles.roles : [];
+        propertyData.propertyManagers = propertyManagers.map(pm => pm.user);
+        propertyData.landlords = landlords.map(l => l.user);
+        propertyData.activeRequests = activeRequests;
+        propertyData.upcomingMaintenance = upcomingMaintenance;
+        propertyData.unitCount = propertyData.units ? propertyData.units.length : 0;
+        
+        // Count tenants
+        const tenantCount = await PropertyUser.countDocuments({
+            property: propertyId,
+            roles: PROPERTY_USER_ROLES_ENUM.TENANT,
+            isActive: true
+        });
+        
+        propertyData.tenantCount = tenantCount;
+        
+        // Log access
+        await auditService.logActivity(
+            AUDIT_ACTION_ENUM.READ,
+            AUDIT_RESOURCE_TYPE_ENUM.Property,
+            propertyId,
+            {
+                userId: currentUser._id,
+                description: `User ${currentUser.email} viewed property "${property.name}".`,
+                status: 'success'
+            }
+        );
+        
+        return propertyData;
+    } catch (error) {
+        logger.error(`PropertyService - Error getting property: ${error.message}`, {
+            userId: currentUser?._id,
+            propertyId
+        });
+        
+        throw error instanceof AppError ? error : new AppError(`Failed to get property: ${error.message}`, 500);
+    }
+};
+
+/**
+ * Updates a property
+ * @param {string} propertyId - Property ID
+ * @param {Object} updateData - Update data
+ * @param {Object} currentUser - The authenticated user
+ * @param {string} ipAddress - Request IP address
+ * @returns {Promise<Object>} Updated property
+ * @throws {AppError} If property not found or unauthorized
+ */
+const updateProperty = async (propertyId, updateData, currentUser, ipAddress) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    
+    try {
+        // Find property
+        const property = await Property.findById(propertyId).session(session);
+        if (!property) {
+            throw new AppError('Property not found.', 404);
+        }
+        
+        // Check authorization - must be admin, landlord, or property manager
+        if (currentUser.role !== ROLE_ENUM.ADMIN) {
+            const isAuthorized = await checkUserHasPropertyRoles(
+                currentUser._id, 
+                propertyId, 
+                [PROPERTY_USER_ROLES_ENUM.LANDLORD, PROPERTY_USER_ROLES_ENUM.PROPERTY_MANAGER, PROPERTY_USER_ROLES_ENUM.ADMIN_ACCESS]
+            );
+            
+            if (!isAuthorized) {
+                throw new AppError('You do not have permission to update this property.', 403);
+            }
+        }
+        
+        // Check for duplicate name if name is being changed
+        if (updateData.name && updateData.name !== property.name) {
+            const duplicateName = await Property.findOne({ 
+                name: updateData.name,
+                _id: { $ne: propertyId }
+            }).session(session);
+            
+            if (duplicateName) {
+                throw new AppError(`Property with name "${updateData.name}" already exists.`, 400);
+            }
+        }
+        
+        // Store old property for audit log
+        const oldProperty = property.toObject();
+        
+        // Apply updates
+        const updatableFields = [
+            'name', 'address', 'propertyType', 'yearBuilt', 'details',
+            'annualOperatingBudget', 'notes', 'isActive', 'amenities'
+        ];
+        
+        for (const field of updatableFields) {
+            if (updateData[field] !== undefined) {
+                if (field === 'propertyType' && updateData[field]) {
+                    if (!PROPERTY_TYPE_ENUM.includes(updateData[field].toLowerCase())) {
+                        throw new AppError(`Invalid property type: ${updateData[field]}. Allowed values: ${PROPERTY_TYPE_ENUM.join(', ')}`, 400);
+                    }
+                    property[field] = updateData[field].toLowerCase();
+                } else {
+                    property[field] = updateData[field];
+                }
+            }
+        }
+        
+        // Save changes
+        const updatedProperty = await property.save({ session });
+        
+        // Create audit log
+        await auditService.logActivity(
+            AUDIT_ACTION_ENUM.UPDATE,
+            AUDIT_RESOURCE_TYPE_ENUM.Property,
+            propertyId,
+            {
+                userId: currentUser._id,
+                ipAddress,
+                description: `Property "${updatedProperty.name}" updated by ${currentUser.email}.`,
+                status: 'success',
+                oldValue: oldProperty,
+                newValue: updatedProperty.toObject()
+            },
+            { session }
+        );
+        
+        // If main contact user is changed, update PropertyUser records
+        if (updateData.mainContactUser && 
+            updateData.mainContactUser !== oldProperty.mainContactUser) {
+            
+            const mainContact = await User.findById(updateData.mainContactUser).session(session);
+            
+            if (mainContact) {
+                // Determine appropriate role based on the contact's global role
+                let contactRole;
+                if (mainContact.role === ROLE_ENUM.LANDLORD) {
+                    contactRole = PROPERTY_USER_ROLES_ENUM.LANDLORD;
+                } else if (mainContact.role === ROLE_ENUM.PROPERTY_MANAGER) {
+                    contactRole = PROPERTY_USER_ROLES_ENUM.PROPERTY_MANAGER;
+                } else {
+                    contactRole = PROPERTY_USER_ROLES_ENUM.ADMIN_ACCESS;
+                }
+                
+                // Check if user already has association
+                const existingAssociation = await PropertyUser.findOne({
+                    user: mainContact._id,
+                    property: propertyId,
+                    isActive: true
+                }).session(session);
+                
+                if (existingAssociation) {
+                    // Update roles if needed
+                    if (!existingAssociation.roles.includes(contactRole)) {
+                        existingAssociation.roles.push(contactRole);
+                        await existingAssociation.save({ session });
+                    }
+                } else {
+                    // Create new association
+                    await PropertyUser.create([{
+                        user: mainContact._id,
+                        property: propertyId,
+                        roles: [contactRole],
+                        isActive: true,
+                        startDate: new Date(),
+                        invitedBy: currentUser._id
+                    }], { session });
+                }
+                
+                // Send notification to the main contact
+                try {
+                    await notificationService.sendNotification({
+                        recipientId: mainContact._id,
+                        type: NOTIFICATION_TYPE_ENUM.PROPERTY_ASSIGNED,
+                        message: `You have been assigned as ${contactRole} for property "${updatedProperty.name}".`,
+                        link: `${FRONTEND_URL}/properties/${propertyId}`,
+                        relatedResourceType: AUDIT_RESOURCE_TYPE_ENUM.Property,
+                        relatedResourceId: propertyId,
+                        emailDetails: {
+                            subject: `Property Assignment: ${updatedProperty.name}`,
+                            html: `
+                                <p>Hello ${mainContact.firstName},</p>
+                                <p>You have been assigned as ${contactRole} for property "${updatedProperty.name}" located in ${updatedProperty.address.city}, ${updatedProperty.address.country}.</p>
+                                <p><a href="${FRONTEND_URL}/properties/${propertyId}">View Property Details</a></p>
+                            `,
+                            text: `Hello ${mainContact.firstName}, You have been assigned as ${contactRole} for property "${updatedProperty.name}" located in ${updatedProperty.address.city}, ${updatedProperty.address.country}. View details at: ${FRONTEND_URL}/properties/${propertyId}`
+                        },
+                        senderId: currentUser._id
+                    }, { session });
+                } catch (notificationError) {
+                    logger.warn(`Failed to send property assignment notification: ${notificationError.message}`);
+                    // Continue even if notification fails
+                }
+            }
+        }
+        
+        // If property is deactivated, update associated entities
+        if (oldProperty.isActive && !updatedProperty.isActive) {
+            // Mark PropertyUser associations as inactive
+            await PropertyUser.updateMany(
+                { property: propertyId, isActive: true },
+                { isActive: false, endDate: new Date() },
+                { session }
+            );
+            
+            // Mark units as inactive
+            await Unit.updateMany(
+                { property: propertyId, isActive: true },
+                { isActive: false },
+                { session }
+            );
+            
+            // Send notifications to associated users
+            const associatedUsers = await PropertyUser.find({
+                property: propertyId,
+                isActive: false, // Just deactivated
+                endDate: { $gte: new Date(Date.now() - 60000) } // Deactivated in the last minute
+            }).distinct('user');
+            
+            if (associatedUsers.length > 0) {
+                const notificationPromises = associatedUsers.map(userId => 
+                    notificationService.sendNotification({
+                        recipientId: userId,
+                        type: NOTIFICATION_TYPE_ENUM.PROPERTY_DEACTIVATED,
+                        message: `Property "${updatedProperty.name}" has been deactivated.`,
+                        relatedResourceType: AUDIT_RESOURCE_TYPE_ENUM.Property,
+                        relatedResourceId: propertyId,
+                        emailDetails: {
+                            subject: `Property Deactivated: ${updatedProperty.name}`,
+                            html: `
+                                <p>Hello,</p>
+                                <p>The property "${updatedProperty.name}" located in ${updatedProperty.address.city}, ${updatedProperty.address.country} has been deactivated.</p>
+                                <p>Your association with this property has been ended.</p>
+                            `,
+                            text: `Hello, The property "${updatedProperty.name}" located in ${updatedProperty.address.city}, ${updatedProperty.address.country} has been deactivated. Your association with this property has been ended.`
+                        },
+                        senderId: currentUser._id
+                    }, { session })
+                );
+                
+                await Promise.allSettled(notificationPromises);
+            }
+        }
+        
+        await session.commitTransaction();
+        
+        logger.info(`PropertyService: Property "${updatedProperty.name}" updated by ${currentUser.email}.`);
+        
+        // Return populated property
+        return Property.findById(updatedProperty._id)
+            .populate({
+                path: 'createdByPropertyUser',
+                populate: {
+                    path: 'user',
+                    select: 'firstName lastName email'
+                }
+            })
+            .populate({
+                path: 'units',
+                options: { sort: { unitName: 1 } }
+            });
+    } catch (error) {
+        await session.abortTransaction();
+        
+        logger.error(`PropertyService - Error updating property: ${error.message}`, {
+            userId: currentUser?._id,
+            propertyId
+        });
+        
+        throw error instanceof AppError ? error : new AppError(`Failed to update property: ${error.message}`, 500);
+    } finally {
+        session.endSession();
+    }
+};
+
+/**
+ * Deletes a property (soft delete if has dependencies)
+ * @param {string} propertyId - Property ID
+ * @param {Object} currentUser - The authenticated user
+ * @param {string} ipAddress - Request IP address
+ * @returns {Promise<void>}
+ * @throws {AppError} If property not found or unauthorized
+ */
+const deleteProperty = async (propertyId, currentUser, ipAddress) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    
+    try {
+        // Find property
+        const property = await Property.findById(propertyId).session(session);
+        if (!property) {
+            throw new AppError('Property not found.', 404);
+        }
+        
+        // Check authorization - only admin or landlord can delete
+        if (currentUser.role !== ROLE_ENUM.ADMIN) {
+            const isLandlord = await checkUserHasPropertyRoles(
+                currentUser._id, 
+                propertyId, 
+                [PROPERTY_USER_ROLES_ENUM.LANDLORD]
+            );
+            
+            if (!isLandlord) {
+                throw new AppError('Only administrators or landlords can delete properties.', 403);
+            }
+        }
+        
+        // Store property data for audit log
+        const propertyData = property.toObject();
+        
+        // Check for dependencies
+        const hasRequests = await Request.countDocuments({ property: propertyId }).session(session);
+        const hasMaintenances = await ScheduledMaintenance.countDocuments({ property: propertyId }).session(session);
+        const hasUnits = property.units && property.units.length > 0;
+        const hasAssociations = await PropertyUser.countDocuments({ property: propertyId }).session(session);
+        
+        const hasDependencies = hasRequests > 0 || hasMaintenances > 0 || hasUnits || hasAssociations > 1; // > 1 because there's at least one association (the creator)
+        
+        if (hasDependencies) {
+            // Soft delete - mark as inactive
+            property.isActive = false;
+            await property.save({ session });
+            
+            // Deactivate associations
+            await PropertyUser.updateMany(
+                { property: propertyId, isActive: true },
+                { 
+                    isActive: false, 
+                    endDate: new Date() 
+                },
+                { session }
+            );
+            
+            // Mark units as inactive
+            await Unit.updateMany(
+                { property: propertyId, isActive: true },
+                { isActive: false },
+                { session }
+            );
+            
+            logger.info(`PropertyService: Property "${property.name}" soft-deleted (marked inactive) due to dependencies.`);
+        } else {
+            // Hard delete - remove property and all direct associations
+            
+            // Delete PropertyUser associations
+            await PropertyUser.deleteMany({ property: propertyId }, { session });
+            
+            // Delete comments
+            await Comment.deleteMany({ 
+                contextId: propertyId, 
+                contextType: AUDIT_RESOURCE_TYPE_ENUM.Property 
+            }, { session });
+            
+            // Delete notifications
+            await Notification.deleteMany({ 
+                'relatedResource.item': propertyId, 
+                'relatedResource.kind': AUDIT_RESOURCE_TYPE_ENUM.Property 
+            }, { session });
+            
+            // Delete the property
+            await property.deleteOne({ session });
+            
+            logger.info(`PropertyService: Property "${property.name}" permanently deleted.`);
+        }
+        
+        // Create audit log
+        await auditService.logActivity(
+            AUDIT_ACTION_ENUM.DELETE,
+            AUDIT_RESOURCE_TYPE_ENUM.Property,
+            propertyId,
+            {
+                userId: currentUser._id,
+                ipAddress,
+                description: `Property "${property.name}" ${hasDependencies ? 'deactivated' : 'deleted'} by ${currentUser.email}.`,
+                status: 'success',
+                oldValue: propertyData,
+                newValue: null,
+                metadata: {
+                    softDelete: hasDependencies,
+                    dependencies: {
+                        requests: hasRequests,
+                        maintenances: hasMaintenances,
+                        units: hasUnits ? property.units.length : 0,
+                        associations: hasAssociations
+                    }
+                }
+            },
+            { session }
+        );
+        
+        // Notify associated users
+        if (hasDependencies) {
+            const associatedUsers = await PropertyUser.find({
+                property: propertyId,
+                isActive: false, // Just deactivated
+                endDate: { $gte: new Date(Date.now() - 60000) }, // Deactivated in the last minute
+                user: { $ne: currentUser._id } // Don't notify the user who performed the deletion
+            }).distinct('user');
+            
+            if (associatedUsers.length > 0) {
+                const notificationPromises = associatedUsers.map(userId => 
+                    notificationService.sendNotification({
+                        recipientId: userId,
+                        type: NOTIFICATION_TYPE_ENUM.PROPERTY_DELETED,
+                        message: `Property "${property.name}" has been deleted.`,
+                        relatedResourceType: AUDIT_RESOURCE_TYPE_ENUM.Property,
+                        relatedResourceId: propertyId,
+                        emailDetails: {
+                            subject: `Property Deleted: ${property.name}`,
+                            html: `
+                                <p>Hello,</p>
+                                <p>The property "${property.name}" located in ${property.address.city}, ${property.address.country} has been deleted.</p>
+                                <p>Your association with this property has been ended.</p>
+                            `,
+                            text: `Hello, The property "${property.name}" located in ${property.address.city}, ${property.address.country} has been deleted. Your association with this property has been ended.`
+                        },
+                        senderId: currentUser._id
+                    }, { session })
+                );
+                
+                await Promise.allSettled(notificationPromises);
+            }
+        }
+        
+        await session.commitTransaction();
+    } catch (error) {
+        await session.abortTransaction();
+        
+        logger.error(`PropertyService - Error deleting property: ${error.message}`, {
+            userId: currentUser?._id,
+            propertyId
+        });
+        
+        throw error instanceof AppError ? error : new AppError(`Failed to delete property: ${error.message}`, 500);
+    } finally {
+        session.endSession();
+    }
+};
+
+/**
+ * Assigns a user to a property with specific roles
+ * @param {string} propertyId - Property ID
+ * @param {string} userIdToAssign - User ID to assign
+ * @param {string[]} roles - Roles to assign
+ * @param {string} [unitId] - Unit ID (required for tenant role)
+ * @param {Object} currentUser - The authenticated user
+ * @param {string} ipAddress - Request IP address
+ * @returns {Promise<Object>} Updated PropertyUser record
+ * @throws {AppError} If property/unit not found or unauthorized
+ */
+const assignUserToProperty = async (propertyId, userIdToAssign, roles, unitId, currentUser, ipAddress) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    
+    try {
+        // Normalize roles to lowercase
+        const normalizedRoles = roles.map(role => role.toLowerCase());
+        
+        // Validate roles
+        const invalidRoles = normalizedRoles.filter(role => !PROPERTY_USER_ROLES_ENUM.includes(role));
+        if (invalidRoles.length > 0) {
+            throw new AppError(`Invalid role(s): ${invalidRoles.join(', ')}. Allowed values: ${PROPERTY_USER_ROLES_ENUM.join(', ')}`, 400);
+        }
+        
+        // Find property and user
+        const [property, userToAssign] = await Promise.all([
+            Property.findById(propertyId).session(session),
+            User.findById(userIdToAssign).session(session)
+        ]);
+        
+        if (!property) {
+            throw new AppError('Property not found.', 404);
+        }
+        
+        if (!userToAssign) {
+            throw new AppError('User to assign not found.', 404);
+        }
+        
+        // Check authorization - only admin or landlord can assign users
+        if (currentUser.role !== ROLE_ENUM.ADMIN) {
+            const isAuthorized = await checkUserHasPropertyRoles(
+                currentUser._id, 
+                propertyId, 
+                [PROPERTY_USER_ROLES_ENUM.LANDLORD, PROPERTY_USER_ROLES_ENUM.ADMIN_ACCESS]
+            );
+            
+            if (!isAuthorized) {
+                throw new AppError('Only administrators or landlords can assign users to properties.', 403);
+            }
+        }
+        
+        // Validate specific roles and permissions
+        if (normalizedRoles.includes(PROPERTY_USER_ROLES_ENUM.TENANT)) {
+            // Tenant role requires a unit
+            if (!unitId) {
+                throw new AppError('Unit ID is required when assigning tenant role.', 400);
+            }
+            
+            // Verify unit exists and belongs to this property
+            const unit = await Unit.findOne({ 
+                _id: unitId, 
+                property: propertyId 
+            }).session(session);
+            
+            if (!unit) {
+                throw new AppError('Unit not found or does not belong to this property.', 404);
+            }
+            
+            // Check if user's global role is compatible
+            if (userToAssign.role !== ROLE_ENUM.TENANT && userToAssign.role !== ROLE_ENUM.ADMIN) {
+                throw new AppError(`User has global role '${userToAssign.role}' which is not compatible with tenant assignment.`, 400);
+            }
+        }
+        
+        if (normalizedRoles.includes(PROPERTY_USER_ROLES_ENUM.LANDLORD)) {
+            // Check if user's global role is compatible
+            if (userToAssign.role !== ROLE_ENUM.LANDLORD && userToAssign.role !== ROLE_ENUM.ADMIN) {
+                throw new AppError(`User has global role '${userToAssign.role}' which is not compatible with landlord assignment.`, 400);
+            }
+        }
+        
+        if (normalizedRoles.includes(PROPERTY_USER_ROLES_ENUM.PROPERTY_MANAGER)) {
+            // Check if user's global role is compatible
+            if (userToAssign.role !== ROLE_ENUM.PROPERTY_MANAGER && userToAssign.role !== ROLE_ENUM.ADMIN) {
+                throw new AppError(`User has global role '${userToAssign.role}' which is not compatible with property manager assignment.`, 400);
+            }
+        }
+        
+        // Check if user already has property association
+        let propertyUser = await PropertyUser.findOne({
+            user: userIdToAssign,
+            property: propertyId
+        }).session(session);
+        
+        if (propertyUser) {
+            // Update existing association
+            if (!propertyUser.isActive) {
+                propertyUser.isActive = true;
+                propertyUser.startDate = new Date();
+                propertyUser.endDate = null;
+            }
+            
+            // Add new roles
+            normalizedRoles.forEach(role => {
+                if (!propertyUser.roles.includes(role)) {
+                    propertyUser.roles.push(role);
+                }
+            });
+            
+            // Update unit if tenant role is being added
+            if (normalizedRoles.includes(PROPERTY_USER_ROLES_ENUM.TENANT) && unitId) {
+                propertyUser.unit = unitId;
+                
+                // Add tenant to unit's tenants array if not already there
+                const unit = await Unit.findById(unitId).session(session);
+                if (unit && !unit.tenants.includes(userIdToAssign)) {
+                    unit.tenants.push(userIdToAssign);
+                    
+                    // Update unit status if it was vacant
+                    if (unit.status === 'vacant') {
+                        unit.status = 'occupied';
+                    }
+                    
+                    await unit.save({ session });
+                }
+            }
+            
+            await propertyUser.save({ session });
+            
+            logger.info(`PropertyService: Updated roles for user ${userToAssign.email} on property "${property.name}": ${propertyUser.roles.join(', ')}`);
+        } else {
+            // Create new association
+            propertyUser = await PropertyUser.create([{
+                user: userIdToAssign,
+                property: propertyId,
+                unit: normalizedRoles.includes(PROPERTY_USER_ROLES_ENUM.TENANT) ? unitId : null,
+                roles: normalizedRoles,
+                invitedBy: currentUser._id,
+                isActive: true,
+                startDate: new Date()
+            }], { session });
+            
+            // If tenant role, add to unit's tenants array
+            if (normalizedRoles.includes(PROPERTY_USER_ROLES_ENUM.TENANT) && unitId) {
+                const unit = await Unit.findById(unitId).session(session);
+                if (unit) {
+                    unit.tenants.push(userIdToAssign);
+                    
+                    // Update unit status if it was vacant
+                    if (unit.status === 'vacant') {
+                        unit.status = 'occupied';
+                    }
+                    
+                    await unit.save({ session });
+                }
+            }
+            
+            logger.info(`PropertyService: Created new property association for user ${userToAssign.email} on property "${property.name}" with roles: ${normalizedRoles.join(', ')}`);
+        }
+        
+        // Create audit log
+        await auditService.logActivity(
+            AUDIT_ACTION_ENUM.ASSIGN_USER,
+            AUDIT_RESOURCE_TYPE_ENUM.PropertyUser,
+            propertyUser._id,
+            {
+                userId: currentUser._id,
+                ipAddress,
+                description: `User ${userToAssign.email} assigned to property "${property.name}" with roles: ${normalizedRoles.join(', ')} by ${currentUser.email}.`,
+                status: 'success',
+                metadata: {
+                    propertyId,
+                    unitId: unitId || null,
+                    roles: normalizedRoles
+                },
+                newValue: propertyUser.toObject()
+            },
+            { session }
+        );
+        
+        // Send notification to the assigned user
+        try {
+            const unitName = unitId ? 
+                (await Unit.findById(unitId).select('unitName').session(session))?.unitName : 
+                null;
+                
+            const roleText = normalizedRoles.length === 1 ? 
+                normalizedRoles[0] : 
+                `${normalizedRoles.slice(0, -1).join(', ')} and ${normalizedRoles[normalizedRoles.length - 1]}`;
+                
+            const unitText = unitName ? ` (Unit: ${unitName})` : '';
+            
+            await notificationService.sendNotification({
+                recipientId: userIdToAssign,
+                type: NOTIFICATION_TYPE_ENUM.PROPERTY_ASSIGNED,
+                message: `You have been assigned as ${roleText} for property "${property.name}"${unitText}.`,
+                link: `${FRONTEND_URL}/properties/${propertyId}${unitId ? `/units/${unitId}` : ''}`,
+                relatedResourceType: AUDIT_RESOURCE_TYPE_ENUM.Property,
+                relatedResourceId: propertyId,
+                emailDetails: {
+                    subject: `New Assignment: ${property.name}`,
+                    html: `
+                        <p>Hello ${userToAssign.firstName},</p>
+                        <p>You have been assigned as ${roleText} for property "${property.name}"${unitText} located in ${property.address.city}, ${property.address.country}.</p>
+                        <p><a href="${FRONTEND_URL}/properties/${propertyId}${unitId ? `/units/${unitId}` : ''}">View Details</a></p>
+                    `,
+                    text: `Hello ${userToAssign.firstName}, You have been assigned as ${roleText} for property "${property.name}"${unitText} located in ${property.address.city}, ${property.address.country}. View details at: ${FRONTEND_URL}/properties/${propertyId}${unitId ? `/units/${unitId}` : ''}`
+                },
+                senderId: currentUser._id
+            }, { session });
+        } catch (notificationError) {
+            logger.warn(`Failed to send property assignment notification: ${notificationError.message}`);
+            // Continue even if notification fails
+        }
+        
+        await session.commitTransaction();
+        
+        // Return updated property user record
+        return PropertyUser.findById(propertyUser._id)
+            .populate('user', 'firstName lastName email')
+            .populate('property', 'name address')
+            .populate('unit', 'unitName');
+    } catch (error) {
+        await session.abortTransaction();
+        
+        logger.error(`PropertyService - Error assigning user to property: ${error.message}`, {
+            userId: currentUser?._id,
+            propertyId,
+            userIdToAssign,
+            roles
+        });
+        
+        throw error instanceof AppError ? error : new AppError(`Failed to assign user to property: ${error.message}`, 500);
+    } finally {
+        session.endSession();
+    }
+};
+
+/**
+ * Removes user roles from a property
+ * @param {string} propertyId - Property ID
+ * @param {string} userIdToRemove - User ID to remove
+ * @param {string[]} rolesToRemove - Roles to remove
+ * @param {string} [unitId] - Unit ID (for tenant role)
+ * @param {Object} currentUser - The authenticated user
+ * @param {string} ipAddress - Request IP address
+ * @returns {Promise<void>}
+ * @throws {AppError} If property not found or unauthorized
+ */
+const removeUserFromProperty = async (propertyId, userIdToRemove, rolesToRemove, unitId, currentUser, ipAddress) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    
+    try {
+        // Normalize roles to lowercase
+        const normalizedRoles = rolesToRemove.map(role => role.toLowerCase());
+        
+        // Validate roles
+        const invalidRoles = normalizedRoles.filter(role => !PROPERTY_USER_ROLES_ENUM.includes(role));
+        if (invalidRoles.length > 0) {
+            throw new AppError(`Invalid role(s): ${invalidRoles.join(', ')}. Allowed values: ${PROPERTY_USER_ROLES_ENUM.join(', ')}`, 400);
+        }
+        
+        // Find property and user
+        const [property, userToRemove] = await Promise.all([
+            Property.findById(propertyId).session(session),
+            User.findById(userIdToRemove).session(session)
+        ]);
+        
+        if (!property) {
+            throw new AppError('Property not found.', 404);
+        }
+        
+        if (!userToRemove) {
+            throw new AppError('User to remove not found.', 404);
+        }
+        
+        // Check authorization - only admin or landlord can remove users
+        if (currentUser.role !== ROLE_ENUM.ADMIN) {
+            const isAuthorized = await checkUserHasPropertyRoles(
+                currentUser._id, 
+                propertyId, 
+                [PROPERTY_USER_ROLES_ENUM.LANDLORD, PROPERTY_USER_ROLES_ENUM.ADMIN_ACCESS]
+            );
+            
+            if (!isAuthorized) {
+                throw new AppError('Only administrators or landlords can remove users from properties.', 403);
+            }
+        }
+        
+        // Validate specific roles
+        if (normalizedRoles.includes(PROPERTY_USER_ROLES_ENUM.TENANT) && !unitId) {
+            throw new AppError('Unit ID is required when removing tenant role.', 400);
+        }
+        
+        // Find the PropertyUser record
+        const propertyUser = await PropertyUser.findOne({
+            user: userIdToRemove,
+            property: propertyId,
+            isActive: true
+        }).session(session);
+        
+        if (!propertyUser) {
+            throw new AppError('User is not actively associated with this property.', 404);
+        }
+        
+        // Store old state for audit log
+        const oldPropertyUser = propertyUser.toObject();
+        
+        // Remove specified roles
+        const remainingRoles = propertyUser.roles.filter(role => !normalizedRoles.includes(role));
+        
+        if (remainingRoles.length === 0) {
+            // If no roles left, deactivate the entire association
+            propertyUser.isActive = false;
+            propertyUser.endDate = new Date();
+        } else {
+            // Otherwise, update the roles list
+            propertyUser.roles = remainingRoles;
+        }
+        
+        // If tenant role is being removed, remove from unit
+        if (normalizedRoles.includes(PROPERTY_USER_ROLES_ENUM.TENANT) && unitId) {
+            // Check if unit exists and matches
+            if (propertyUser.unit && propertyUser.unit.toString() === unitId) {
+                propertyUser.unit = null;
+                
+                // Remove from unit's tenants array
+                const unit = await Unit.findById(unitId).session(session);
+                if (unit) {
+                    unit.tenants = unit.tenants.filter(id => id.toString() !== userIdToRemove);
+                    
+                    // Update unit status if no tenants left
+                    if (unit.tenants.length === 0) {
+                        unit.status = 'vacant';
+                    }
+                    
+                    await unit.save({ session });
+                }
+            } else {
+                throw new AppError('User is not a tenant of the specified unit.', 400);
+            }
+        }
+        
+        await propertyUser.save({ session });
+        
+        // Create audit log
+        await auditService.logActivity(
+            AUDIT_ACTION_ENUM.REMOVE_USER,
+            AUDIT_RESOURCE_TYPE_ENUM.PropertyUser,
+            propertyUser._id,
+            {
+                userId: currentUser._id,
+                ipAddress,
+                description: `Roles ${normalizedRoles.join(', ')} removed from user ${userToRemove.email} for property "${property.name}" by ${currentUser.email}.`,
+                status: 'success',
+                oldValue: oldPropertyUser,
+                newValue: propertyUser.toObject(),
+                metadata: {
+                    propertyId,
+                    unitId: unitId || null,
+                    removedRoles: normalizedRoles,
+                    remainingRoles,
+                    fullyDeactivated: remainingRoles.length === 0
+                }
+            },
+            { session }
+        );
+        
+        // Send notification to the user
+        try {
+            const unitName = unitId ? 
+                (await Unit.findById(unitId).select('unitName').session(session))?.unitName : 
+                null;
+                
+            const roleText = normalizedRoles.length === 1 ? 
+                normalizedRoles[0] : 
+                `${normalizedRoles.slice(0, -1).join(', ')} and ${normalizedRoles[normalizedRoles.length - 1]}`;
+                
+            const unitText = unitName ? ` (Unit: ${unitName})` : '';
+            
+            await notificationService.sendNotification({
+                recipientId: userIdToRemove,
+                type: NOTIFICATION_TYPE_ENUM.PROPERTY_ROLE_REMOVED,
+                message: `Your role as ${roleText} for property "${property.name}"${unitText} has been removed.`,
+                relatedResourceType: AUDIT_RESOURCE_TYPE_ENUM.Property,
+                relatedResourceId: propertyId,
+                emailDetails: {
+                    subject: `Role Removed: ${property.name}`,
+                    html: `
+                        <p>Hello ${userToRemove.firstName},</p>
+                        <p>Your role as ${roleText} for property "${property.name}"${unitText} located in ${property.address.city}, ${property.address.country} has been removed.</p>
+                        ${remainingRoles.length > 0 ? `<p>You still have the following roles: ${remainingRoles.join(', ')}.</p>` : '<p>You no longer have any roles for this property.</p>'}
+                    `,
+                    text: `Hello ${userToRemove.firstName}, Your role as ${roleText} for property "${property.name}"${unitText} located in ${property.address.city}, ${property.address.country} has been removed. ${remainingRoles.length > 0 ? `You still have the following roles: ${remainingRoles.join(', ')}.` : 'You no longer have any roles for this property.'}`
+                },
+                senderId: currentUser._id
+            }, { session });
+        } catch (notificationError) {
+            logger.warn(`Failed to send property role removal notification: ${notificationError.message}`);
+            // Continue even if notification fails
+        }
+        
+        await session.commitTransaction();
+        
+        logger.info(`PropertyService: Roles ${normalizedRoles.join(', ')} removed from user ${userToRemove.email} for property "${property.name}" by ${currentUser.email}.`);
+    } catch (error) {
+        await session.abortTransaction();
+        
+        logger.error(`PropertyService - Error removing user from property: ${error.message}`, {
+            userId: currentUser?._id,
+            propertyId,
+            userIdToRemove,
+            rolesToRemove
+        });
+        
+        throw error instanceof AppError ? error : new AppError(`Failed to remove user from property: ${error.message}`, 500);
+    } finally {
+        session.endSession();
+    }
+};
 
 module.exports = {
     createProperty,
@@ -602,5 +1312,5 @@ module.exports = {
     updateProperty,
     deleteProperty,
     assignUserToProperty,
-    removeUserFromProperty,
+    removeUserFromProperty
 };

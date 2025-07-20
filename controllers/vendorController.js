@@ -4,9 +4,9 @@ const logger = require('../utils/logger');
 const AppError = require('../utils/AppError');
 
 /**
- * @desc Create a new vendor
- * @route POST /api/vendors
- * @access Private (Admin, PropertyManager, Landlord)
+ * @desc    Create a new vendor
+ * @route   POST /api/vendors
+ * @access  Private (Admin, PropertyManager, Landlord)
  */
 const createVendor = asyncHandler(async (req, res) => {
   const vendorData = req.body;
@@ -18,14 +18,14 @@ const createVendor = asyncHandler(async (req, res) => {
   res.status(201).json({
     success: true,
     message: 'Vendor created successfully.',
-    vendor: newVendor
+    data: newVendor
   });
 });
 
 /**
- * @desc Get all vendors with filtering, search, and pagination
- * @route GET /api/vendors
- * @access Private (Admin, PropertyManager, Landlord)
+ * @desc    Get all vendors with filtering, search, and pagination
+ * @route   GET /api/vendors
+ * @access  Private (Admin, PropertyManager, Landlord)
  */
 const getAllVendors = asyncHandler(async (req, res) => {
   const user = req.user;
@@ -35,12 +35,14 @@ const getAllVendors = asyncHandler(async (req, res) => {
     propertyId: req.query.propertyId,
     search: req.query.search
   };
-  const page = req.query.page || 1;
-  const limit = req.query.limit || 10;
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 10;
+  const sortBy = req.query.sortBy || 'createdAt';
+  const sortOrder = req.query.sortOrder || 'desc';
   const ipAddress = req.ip;
 
-  const { vendors, total, page: currentPage, limit: currentLimit } =
-    await vendorService.getVendorsForUser(user, filters, page, limit, ipAddress);
+  const { vendors, total, page: currentPage, limit: currentLimit, totalPages } =
+    await vendorService.getVendorsForUser(user, filters, page, limit, ipAddress, sortBy, sortOrder);
 
   res.status(200).json({
     success: true,
@@ -48,31 +50,33 @@ const getAllVendors = asyncHandler(async (req, res) => {
     total,
     page: currentPage,
     limit: currentLimit,
+    totalPages,
     data: vendors
   });
 });
 
 /**
- * @desc Get a specific vendor by ID
- * @route GET /api/vendors/:id
- * @access Private (Admin, PropertyManager, Landlord)
+ * @desc    Get a specific vendor by ID
+ * @route   GET /api/vendors/:id
+ * @access  Private (Admin, PropertyManager, Landlord)
  */
 const getVendorById = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const user = req.user;
+  const ipAddress = req.ip;
 
-  const vendor = await vendorService.getVendorById(id, user);
+  const vendor = await vendorService.getVendorById(id, user, ipAddress);
 
   res.status(200).json({
     success: true,
-    vendor
+    data: vendor
   });
 });
 
 /**
- * @desc Update vendor details
- * @route PUT /api/vendors/:id
- * @access Private (Admin, PropertyManager, Landlord)
+ * @desc    Update vendor details
+ * @route   PUT /api/vendors/:id
+ * @access  Private (Admin, PropertyManager, Landlord)
  */
 const updateVendor = asyncHandler(async (req, res) => {
   const { id } = req.params;
@@ -85,14 +89,14 @@ const updateVendor = asyncHandler(async (req, res) => {
   res.status(200).json({
     success: true,
     message: 'Vendor updated successfully.',
-    vendor: updatedVendor
+    data: updatedVendor
   });
 });
 
 /**
- * @desc Delete a vendor
- * @route DELETE /api/vendors/:id
- * @access Private (Admin only)
+ * @desc    Delete a vendor
+ * @route   DELETE /api/vendors/:id
+ * @access  Private (Admin only)
  */
 const deleteVendor = asyncHandler(async (req, res) => {
   const { id } = req.params;
@@ -107,10 +111,27 @@ const deleteVendor = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * @desc    Get vendor statistics
+ * @route   GET /api/vendors/stats
+ * @access  Private (Admin, PropertyManager, Landlord)
+ */
+const getVendorStats = asyncHandler(async (req, res) => {
+  const user = req.user;
+  
+  const stats = await vendorService.getVendorStats(user);
+  
+  res.status(200).json({
+    success: true,
+    data: stats
+  });
+});
+
 module.exports = {
   createVendor,
   getAllVendors,
   getVendorById,
   updateVendor,
   deleteVendor,
+  getVendorStats
 };

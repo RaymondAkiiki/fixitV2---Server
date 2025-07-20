@@ -2,37 +2,56 @@
 
 const express = require('express');
 const router = express.Router();
-const onboardingController = require('../controllers/onboardingController'); // Import controller
-const { protect, authorizeRoles } = require('../middleware/authMiddleware'); // Import auth middleware
-const { upload } = require('../middleware/uploadMiddleware'); // <--- CORRECTED IMPORT
-const { validateMongoId, validateResult } = require('../utils/validationUtils'); // Import validation utilities
-const { ROLE_ENUM, ONBOARDING_CATEGORY_ENUM, ONBOARDING_VISIBILITY_ENUM } = require('../utils/constants/enums'); // Import enums
-const { body, query, param } = require('express-validator'); // For specific body/query/param validation
-
-// Private routes (require authentication)
+const onboardingController = require('../controllers/onboardingController');
+const { protect, authorizeRoles } = require('../middleware/authMiddleware');
+const { upload } = require('../middleware/uploadMiddleware');
+const { validateMongoId, validateResult } = require('../utils/validationUtils');
+const { ROLE_ENUM, ONBOARDING_CATEGORY_ENUM, ONBOARDING_VISIBILITY_ENUM } = require('../utils/constants/enums');
+const { body, query, param } = require('express-validator');
 
 /**
  * @route POST /api/onboarding
- * @desc Upload and create a new onboarding document
- * @access Private (Landlord/Admin, or PM with 'manage_onboarding' permission)
- * @middleware upload handles file upload and attaches to req.file
+ * @desc Create a new onboarding document
+ * @access Private (Landlord/Admin, PropertyManager)
  */
 router.post(
     '/',
     protect,
     authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.LANDLORD, ROLE_ENUM.PROPERTY_MANAGER),
-    upload.single('documentFile'), // <--- THIS IS THE KEY CHANGE
-    // 'documentFile' should be the name of the field in your form/formData
-    // that contains the file you are uploading.
+    upload.single('documentFile'),
     [
-        body('title').notEmpty().withMessage('Title is required.').trim().isLength({ max: 200 }).withMessage('Title cannot exceed 200 characters.'),
-        body('description').optional().isString().trim().isLength({ max: 1000 }).withMessage('Description cannot exceed 1000 characters.'),
-        body('category').notEmpty().withMessage('Category is required.').isIn(ONBOARDING_CATEGORY_ENUM).withMessage(`Invalid category. Must be one of: ${ONBOARDING_CATEGORY_ENUM.join(', ')}`),
-        body('visibility').notEmpty().withMessage('Visibility is required.').isIn(ONBOARDING_VISIBILITY_ENUM).withMessage(`Invalid visibility. Must be one of: ${ONBOARDING_VISIBILITY_ENUM.join(', ')}`),
-        body('propertyId').optional().isMongoId().withMessage('Property ID must be a valid MongoDB ID.'),
-        body('unitId').optional().isMongoId().withMessage('Unit ID must be a valid MongoDB ID.'),
-        body('tenantId').optional().isMongoId().withMessage('Tenant ID must be a valid MongoDB ID.'),
-        validateResult // Apply validation after multer processes the file
+        body('title')
+            .notEmpty().withMessage('Title is required.')
+            .trim()
+            .isLength({ max: 200 }).withMessage('Title cannot exceed 200 characters.'),
+            
+        body('description')
+            .optional()
+            .isString().withMessage('Description must be a string.')
+            .trim()
+            .isLength({ max: 1000 }).withMessage('Description cannot exceed 1000 characters.'),
+            
+        body('category')
+            .notEmpty().withMessage('Category is required.')
+            .isIn(ONBOARDING_CATEGORY_ENUM).withMessage(`Invalid category. Must be one of: ${ONBOARDING_CATEGORY_ENUM.join(', ')}`),
+            
+        body('visibility')
+            .notEmpty().withMessage('Visibility is required.')
+            .isIn(ONBOARDING_VISIBILITY_ENUM).withMessage(`Invalid visibility. Must be one of: ${ONBOARDING_VISIBILITY_ENUM.join(', ')}`),
+            
+        body('propertyId')
+            .optional()
+            .isMongoId().withMessage('Property ID must be a valid MongoDB ID.'),
+            
+        body('unitId')
+            .optional()
+            .isMongoId().withMessage('Unit ID must be a valid MongoDB ID.'),
+            
+        body('tenantId')
+            .optional()
+            .isMongoId().withMessage('Tenant ID must be a valid MongoDB ID.'),
+            
+        validateResult
     ],
     onboardingController.createOnboardingDocument
 );
@@ -40,18 +59,32 @@ router.post(
 /**
  * @route GET /api/onboarding
  * @desc Get all onboarding documents accessible by the logged-in user
- * @access Private
+ * @access Private (with access control)
  */
 router.get(
     '/',
     protect,
-    // Authorization handled in service based on user role and document visibility
     [
-        query('category').optional().isIn(ONBOARDING_CATEGORY_ENUM).withMessage(`Invalid category filter. Must be one of: ${ONBOARDING_CATEGORY_ENUM.join(', ')}`),
-        query('propertyId').optional().isMongoId().withMessage('Property ID filter must be a valid MongoDB ID.'),
-        query('unitId').optional().isMongoId().withMessage('Unit ID filter must be a valid MongoDB ID.'),
-        query('page').optional().isInt({ min: 1 }).withMessage('Page must be a positive integer.'),
-        query('limit').optional().isInt({ min: 1 }).withMessage('Limit must be a positive integer.'),
+        query('category')
+            .optional()
+            .isIn(ONBOARDING_CATEGORY_ENUM).withMessage(`Invalid category filter. Must be one of: ${ONBOARDING_CATEGORY_ENUM.join(', ')}`),
+            
+        query('propertyId')
+            .optional()
+            .isMongoId().withMessage('Property ID filter must be a valid MongoDB ID.'),
+            
+        query('unitId')
+            .optional()
+            .isMongoId().withMessage('Unit ID filter must be a valid MongoDB ID.'),
+            
+        query('page')
+            .optional()
+            .isInt({ min: 1 }).withMessage('Page must be a positive integer.'),
+            
+        query('limit')
+            .optional()
+            .isInt({ min: 1, max: 100 }).withMessage('Limit must be between 1 and 100.'),
+            
         validateResult
     ],
     onboardingController.getOnboardingDocuments
@@ -72,7 +105,7 @@ router.get(
 /**
  * @route PUT /api/onboarding/:id
  * @desc Update an onboarding document
- * @access Private (Landlord/Admin, or PM with 'manage_onboarding' permission)
+ * @access Private (Landlord/Admin, PropertyManager)
  */
 router.put(
     '/:id',
@@ -80,14 +113,38 @@ router.put(
     authorizeRoles(ROLE_ENUM.ADMIN, ROLE_ENUM.LANDLORD, ROLE_ENUM.PROPERTY_MANAGER),
     validateMongoId('id'),
     [
-        body('title').optional().isString().trim().isLength({ max: 200 }).withMessage('Title cannot exceed 200 characters.'),
-        body('description').optional().isString().trim().isLength({ max: 1000 }).withMessage('Description cannot exceed 1000 characters.'),
-        body('category').optional().isIn(ONBOARDING_CATEGORY_ENUM).withMessage(`Invalid category. Must be one of: ${ONBOARDING_CATEGORY_ENUM.join(', ')}`),
-        body('visibility').optional().isIn(ONBOARDING_VISIBILITY_ENUM).withMessage(`Invalid visibility. Must be one of: ${ONBOARDING_VISIBILITY_ENUM.join(', ')}`),
-        body('propertyId').optional().isMongoId().withMessage('Property ID must be a valid MongoDB ID.'),
-        body('unitId').optional().isMongoId().withMessage('Unit ID must be a valid MongoDB ID.'),
-        body('tenantId').optional().isMongoId().withMessage('Tenant ID must be a valid MongoDB ID.'),
-        // filePath and fileName are not expected here for update, handle file replacement separately if needed
+        body('title')
+            .optional()
+            .isString().withMessage('Title must be a string.')
+            .trim()
+            .isLength({ max: 200 }).withMessage('Title cannot exceed 200 characters.'),
+            
+        body('description')
+            .optional()
+            .isString().withMessage('Description must be a string.')
+            .trim()
+            .isLength({ max: 1000 }).withMessage('Description cannot exceed 1000 characters.'),
+            
+        body('category')
+            .optional()
+            .isIn(ONBOARDING_CATEGORY_ENUM).withMessage(`Invalid category. Must be one of: ${ONBOARDING_CATEGORY_ENUM.join(', ')}`),
+            
+        body('visibility')
+            .optional()
+            .isIn(ONBOARDING_VISIBILITY_ENUM).withMessage(`Invalid visibility. Must be one of: ${ONBOARDING_VISIBILITY_ENUM.join(', ')}`),
+            
+        body('propertyId')
+            .optional()
+            .isMongoId().withMessage('Property ID must be a valid MongoDB ID.'),
+            
+        body('unitId')
+            .optional()
+            .isMongoId().withMessage('Unit ID must be a valid MongoDB ID.'),
+            
+        body('tenantId')
+            .optional()
+            .isMongoId().withMessage('Tenant ID must be a valid MongoDB ID.'),
+            
         validateResult
     ],
     onboardingController.updateOnboardingDocument
@@ -96,7 +153,7 @@ router.put(
 /**
  * @route DELETE /api/onboarding/:id
  * @desc Delete an onboarding document
- * @access Private (Landlord/Admin, or PM with 'manage_onboarding' permission)
+ * @access Private (Landlord/Admin, PropertyManager)
  */
 router.delete(
     '/:id',
@@ -114,7 +171,7 @@ router.delete(
 router.patch(
     '/:id/complete',
     protect,
-    authorizeRoles(ROLE_ENUM.TENANT), // Only tenants can mark as complete
+    authorizeRoles(ROLE_ENUM.TENANT),
     validateMongoId('id'),
     onboardingController.markOnboardingCompleted
 );

@@ -1,363 +1,409 @@
 // src/controllers/requestController.js
 
-const asyncHandler = require('../utils/asyncHandler'); // For handling async errors
-const requestService = require('../services/requestService'); // Import the new request service
-const logger = require('../utils/logger'); // Import logger
-const AppError = require('../utils/AppError'); // Import custom AppError
+const asyncHandler = require('../utils/asyncHandler');
+const requestService = require('../services/requestService');
+const logger = require('../utils/logger');
+const AppError = require('../utils/AppError');
 
 /**
  * @desc Create a new maintenance request
  * @route POST /api/requests
  * @access Private (Tenant, PropertyManager, Landlord, Admin)
- * @body {string} title, {string} description, {string} category, {string} priority,
- * {string} propertyId, {string} [unitId], {Array<object>} [media] - Array of uploaded files from multer
  */
 const createRequest = asyncHandler(async (req, res) => {
-    const requestData = req.body;
-    const currentUser = req.user;
-    const ipAddress = req.ip;
+    try {
+        const requestData = {
+            ...req.body,
+            files: req.files || []
+        };
+        
+        const currentUser = req.user;
+        const ipAddress = req.ip;
 
-    // If files are uploaded via multer, they will be in req.files
-    // The service will handle uploading these to Cloudinary
-    requestData.media = req.files || []; // Pass multer files to service
+        const newRequest = await requestService.createRequest(requestData, currentUser, ipAddress);
 
-    const newRequest = await requestService.createRequest(requestData, currentUser, ipAddress);
-
-    res.status(201).json({
-        success: true,
-        message: 'Maintenance request created successfully.',
-        request: newRequest
-    });
+        res.status(201).json({
+            success: true,
+            message: 'Maintenance request created successfully.',
+            data: newRequest
+        });
+    } catch (error) {
+        logger.error(`RequestController - Error creating request: ${error.message}`);
+        throw error;
+    }
 });
 
 /**
  * @desc Get all requests with filtering, search, and pagination
  * @route GET /api/requests
  * @access Private (with access control)
- * @query {string} [status] - Filter by request status
- * @query {string} [category] - Filter by category
- * @query {string} [priority] - Filter by priority
- * @query {string} [propertyId] - Filter by associated property
- * @query {string} [unitId] - Filter by associated unit
- * @query {string} [search] - Search by title or description
- * @query {Date} [startDate] - Filter requests created on or after this date
- * @query {Date} [endDate] - Filter requests created on or before this date
- * @query {string} [assignedToId] - Filter by assigned user/vendor ID
- * @query {string} [assignedToType] - Filter by assigned type ('User' or 'Vendor')
- * @query {number} [page=1] - Page number
- * @query {number} [limit=10] - Items per page
  */
 const getAllRequests = asyncHandler(async (req, res) => {
-    const currentUser = req.user;
-    const filters = req.query;
-    const page = req.query.page || 1;
-    const limit = req.query.limit || 10;
+    try {
+        const currentUser = req.user;
+        const filters = req.query;
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 10;
 
-    const { requests, total, page: currentPage, limit: currentLimit } = await requestService.getAllRequests(currentUser, filters, page, limit);
+        const result = await requestService.getAllRequests(currentUser, filters, page, limit);
 
-    res.status(200).json({
-        success: true,
-        count: requests.length,
-        total,
-        page: currentPage,
-        limit: currentLimit,
-        data: requests
-    });
+        res.status(200).json({
+            success: true,
+            count: result.requests.length,
+            total: result.total,
+            page: result.page,
+            limit: result.limit,
+            pages: result.pages,
+            data: result.requests
+        });
+    } catch (error) {
+        logger.error(`RequestController - Error getting requests: ${error.message}`);
+        throw error;
+    }
 });
 
 /**
  * @desc Get specific request details by ID
  * @route GET /api/requests/:id
  * @access Private (with access control)
- * @param {string} id - Request ID from URL params
  */
 const getRequestById = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const currentUser = req.user;
+    try {
+        const { id } = req.params;
+        const currentUser = req.user;
 
-    const request = await requestService.getRequestById(id, currentUser);
+        const request = await requestService.getRequestById(id, currentUser);
 
-    res.status(200).json({
-        success: true,
-        request: request
-    });
+        res.status(200).json({
+            success: true,
+            data: request
+        });
+    } catch (error) {
+        logger.error(`RequestController - Error getting request: ${error.message}`);
+        throw error;
+    }
 });
 
 /**
  * @desc Update a maintenance request (status, priority, description by authorized users)
  * @route PUT /api/requests/:id
  * @access Private (Admin, PropertyManager, Landlord - with access control; Tenant for limited fields)
- * @param {string} id - Request ID from URL params
- * @body {string} [title], {string} [description], {string} [category], {string} [priority], {string} [status]
  */
 const updateRequest = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const updateData = req.body;
-    const currentUser = req.user;
-    const ipAddress = req.ip;
+    try {
+        const { id } = req.params;
+        const updateData = req.body;
+        const currentUser = req.user;
+        const ipAddress = req.ip;
 
-    const updatedRequest = await requestService.updateRequest(id, updateData, currentUser, ipAddress);
+        const updatedRequest = await requestService.updateRequest(id, updateData, currentUser, ipAddress);
 
-    res.status(200).json({
-        success: true,
-        message: 'Maintenance request updated successfully.',
-        request: updatedRequest
-    });
+        res.status(200).json({
+            success: true,
+            message: 'Maintenance request updated successfully.',
+            data: updatedRequest
+        });
+    } catch (error) {
+        logger.error(`RequestController - Error updating request: ${error.message}`);
+        throw error;
+    }
 });
 
 /**
  * @desc Delete a maintenance request
  * @route DELETE /api/requests/:id
  * @access Private (Admin, PropertyManager, Landlord)
- * @param {string} id - Request ID from URL params
  */
 const deleteRequest = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const currentUser = req.user;
-    const ipAddress = req.ip;
+    try {
+        const { id } = req.params;
+        const currentUser = req.user;
+        const ipAddress = req.ip;
 
-    await requestService.deleteRequest(id, currentUser, ipAddress);
+        await requestService.deleteRequest(id, currentUser, ipAddress);
 
-    res.status(200).json({
-        success: true,
-        message: 'Maintenance request deleted successfully.'
-    });
+        res.status(200).json({
+            success: true,
+            message: 'Maintenance request deleted successfully.'
+        });
+    } catch (error) {
+        logger.error(`RequestController - Error deleting request: ${error.message}`);
+        throw error;
+    }
 });
 
 /**
  * @desc Assign request to vendor or internal staff
  * @route POST /api/requests/:id/assign
  * @access Private (PropertyManager, Landlord, Admin)
- * @param {string} id - Request ID from URL params
- * @body {string} assignedToId - ID of the user/vendor to assign
- * @body {string} assignedToModel - 'User' or 'Vendor'
  */
 const assignRequest = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const { assignedToId, assignedToModel } = req.body;
-    const currentUser = req.user;
-    const ipAddress = req.ip;
+    try {
+        const { id } = req.params;
+        const { assignedToId, assignedToModel } = req.body;
+        const currentUser = req.user;
+        const ipAddress = req.ip;
 
-    const updatedRequest = await requestService.assignRequest(id, assignedToId, assignedToModel, currentUser, ipAddress);
+        const updatedRequest = await requestService.assignRequest(id, assignedToId, assignedToModel, currentUser, ipAddress);
 
-    res.status(200).json({
-        success: true,
-        message: 'Request assigned successfully.',
-        request: updatedRequest
-    });
+        res.status(200).json({
+            success: true,
+            message: 'Request assigned successfully.',
+            data: updatedRequest
+        });
+    } catch (error) {
+        logger.error(`RequestController - Error assigning request: ${error.message}`);
+        throw error;
+    }
 });
-
 
 /**
  * @desc Upload media file(s) for a request
  * @route POST /api/requests/:id/media
  * @access Private (Tenant, PropertyManager, Landlord, Admin, Assigned Vendor/User)
- * @param {string} id - Request ID from URL params
- * @body {Array<object>} files - Array of uploaded files from multer (from req.files)
  */
 const uploadMedia = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const files = req.files; // Files from multer middleware (upload.any() will populate this)
-    const currentUser = req.user;
-    const ipAddress = req.ip;
+    try {
+        const { id } = req.params;
+        const files = req.files;
+        const currentUser = req.user;
+        const ipAddress = req.ip;
 
-    // The service will handle iterating through files, uploading to Cloudinary,
-    // and saving Media model entries, then updating the request.
-    const updatedRequest = await requestService.uploadMediaToRequest(id, files, currentUser, ipAddress);
+        if (!files || files.length === 0) {
+            throw new AppError('No files provided for upload.', 400);
+        }
 
-    res.status(200).json({
-        success: true,
-        message: 'Media uploaded successfully.',
-        media: updatedRequest.media // Assuming service returns updated request with media
-    });
+        const updatedRequest = await requestService.uploadMediaToRequest(id, files, currentUser, ipAddress);
+
+        res.status(200).json({
+            success: true,
+            message: 'Media uploaded successfully.',
+            data: updatedRequest
+        });
+    } catch (error) {
+        logger.error(`RequestController - Error uploading media: ${error.message}`);
+        throw error;
+    }
 });
 
 /**
  * @desc Delete a media file from a request
  * @route DELETE /api/requests/:id/media
  * @access Private (Admin, PropertyManager, Landlord, Creator, Assigned Vendor/User)
- * @param {string} id - Request ID from URL params
- * @body {string} mediaUrl - The URL of the media to delete
  */
 const deleteMedia = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const { mediaUrl } = req.body;
-    const currentUser = req.user;
-    const ipAddress = req.ip;
+    try {
+        const { id } = req.params;
+        const { mediaUrl } = req.body;
+        const currentUser = req.user;
+        const ipAddress = req.ip;
 
-    const updatedRequest = await requestService.deleteMediaFromRequest(id, mediaUrl, currentUser, ipAddress);
+        if (!mediaUrl) {
+            throw new AppError('Media URL is required to delete a file.', 400);
+        }
 
-    res.status(200).json({
-        success: true,
-        message: 'Media deleted successfully.',
-        remainingMedia: updatedRequest.media
-    });
+        const updatedRequest = await requestService.deleteMediaFromRequest(id, mediaUrl, currentUser, ipAddress);
+
+        res.status(200).json({
+            success: true,
+            message: 'Media deleted successfully.',
+            data: updatedRequest
+        });
+    } catch (error) {
+        logger.error(`RequestController - Error deleting media: ${error.message}`);
+        throw error;
+    }
 });
 
 /**
  * @desc Submit feedback for a completed request (Tenant only)
  * @route POST /api/requests/:id/feedback
  * @access Private (Tenant)
- * @param {string} id - Request ID from URL params
- * @body {number} rating - Rating (1-5)
- * @body {string} [comment] - Feedback comment
  */
 const submitFeedback = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const { rating, comment } = req.body;
-    const currentUser = req.user;
-    const ipAddress = req.ip;
+    try {
+        const { id } = req.params;
+        const { rating, comment } = req.body;
+        const currentUser = req.user;
+        const ipAddress = req.ip;
 
-    const updatedRequest = await requestService.submitFeedback(id, rating, comment, currentUser, ipAddress);
+        const updatedRequest = await requestService.submitFeedback(id, rating, comment, currentUser, ipAddress);
 
-    res.status(200).json({
-        success: true,
-        message: 'Feedback submitted successfully.',
-        request: updatedRequest
-    });
+        res.status(200).json({
+            success: true,
+            message: 'Feedback submitted successfully.',
+            data: updatedRequest
+        });
+    } catch (error) {
+        logger.error(`RequestController - Error submitting feedback: ${error.message}`);
+        throw error;
+    }
 });
 
 /**
  * @desc Enable public link for a request
  * @route POST /api/requests/:id/enable-public-link
  * @access Private (PropertyManager, Landlord, Admin)
- * @param {string} id - Request ID from URL params
- * @body {number} [expiresInDays] - Optional: duration in days for the link to be valid.
  */
 const enablePublicLink = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const { expiresInDays } = req.body;
-    const currentUser = req.user;
-    const ipAddress = req.ip;
+    try {
+        const { id } = req.params;
+        const { expiresInDays } = req.body;
+        const currentUser = req.user;
+        const ipAddress = req.ip;
 
-    const publicLink = await requestService.enablePublicLink(id, expiresInDays, currentUser, ipAddress);
+        const publicLink = await requestService.enablePublicLink(id, expiresInDays, currentUser, ipAddress);
 
-    res.status(200).json({
-        success: true,
-        message: 'Public link enabled successfully.',
-        publicLink: publicLink
-    });
+        res.status(200).json({
+            success: true,
+            message: 'Public link enabled successfully.',
+            publicLink
+        });
+    } catch (error) {
+        logger.error(`RequestController - Error enabling public link: ${error.message}`);
+        throw error;
+    }
 });
 
 /**
  * @desc Disable public link for a request
  * @route POST /api/requests/:id/disable-public-link
  * @access Private (PropertyManager, Landlord, Admin)
- * @param {string} id - Request ID from URL params
  */
 const disablePublicLink = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const currentUser = req.user;
-    const ipAddress = req.ip;
+    try {
+        const { id } = req.params;
+        const currentUser = req.user;
+        const ipAddress = req.ip;
 
-    await requestService.disablePublicLink(id, currentUser, ipAddress);
+        await requestService.disablePublicLink(id, currentUser, ipAddress);
 
-    res.status(200).json({
-        success: true,
-        message: 'Public link disabled successfully.'
-    });
+        res.status(200).json({
+            success: true,
+            message: 'Public link disabled successfully.'
+        });
+    } catch (error) {
+        logger.error(`RequestController - Error disabling public link: ${error.message}`);
+        throw error;
+    }
 });
 
 /**
  * @desc Get external vendor view of a request
  * @route GET /api/requests/public/:publicToken
  * @access Public
- * @param {string} publicToken - Public token from URL params
  */
 const getPublicRequestView = asyncHandler(async (req, res) => {
-    const { publicToken } = req.params;
+    try {
+        const { publicToken } = req.params;
 
-    const publicViewData = await requestService.getPublicRequestView(publicToken);
+        const publicViewData = await requestService.getPublicRequestView(publicToken);
 
-    res.status(200).json({
-        success: true,
-        data: publicViewData
-    });
+        res.status(200).json({
+            success: true,
+            data: publicViewData
+        });
+    } catch (error) {
+        logger.error(`RequestController - Error getting public request view: ${error.message}`);
+        throw error;
+    }
 });
 
 /**
  * @desc External vendor updates status/comments for a request
  * @route POST /api/requests/public/:publicToken/update
  * @access Public (limited functionality)
- * @param {string} publicToken - Public token from URL params
- * @body {string} [status] - New status (e.g., 'in_progress', 'completed')
- * @body {string} [commentMessage] - New comment message
- * @body {string} name - Name of the external updater (required)
- * @body {string} phone - Phone of the external updater (required)
  */
 const publicRequestUpdate = asyncHandler(async (req, res) => {
-    const { publicToken } = req.params;
-    const updateData = req.body; // Includes status, commentMessage, name, phone
-    const ipAddress = req.ip;
+    try {
+        const { publicToken } = req.params;
+        const updateData = req.body;
+        const ipAddress = req.ip;
 
-    await requestService.publicRequestUpdate(publicToken, updateData, ipAddress);
+        const updatedRequest = await requestService.publicRequestUpdate(publicToken, updateData, ipAddress);
 
-    res.status(200).json({
-        success: true,
-        message: 'Request updated successfully via public link.'
-    });
+        res.status(200).json({
+            success: true,
+            message: 'Request updated successfully via public link.',
+            data: updatedRequest
+        });
+    } catch (error) {
+        logger.error(`RequestController - Error updating request via public link: ${error.message}`);
+        throw error;
+    }
 });
 
 /**
  * @desc Verify a completed request (PM/Landlord/Admin)
  * @route PUT /api/requests/:id/verify
  * @access Private (PropertyManager, Landlord, Admin)
- * @param {string} id - Request ID from URL params
  */
 const verifyRequest = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const currentUser = req.user;
-    const ipAddress = req.ip;
+    try {
+        const { id } = req.params;
+        const currentUser = req.user;
+        const ipAddress = req.ip;
 
-    const updatedRequest = await requestService.verifyRequest(id, currentUser, ipAddress);
+        const updatedRequest = await requestService.verifyRequest(id, currentUser, ipAddress);
 
-    res.status(200).json({
-        success: true,
-        message: 'Request verified successfully.',
-        request: updatedRequest
-    });
+        res.status(200).json({
+            success: true,
+            message: 'Request verified successfully.',
+            data: updatedRequest
+        });
+    } catch (error) {
+        logger.error(`RequestController - Error verifying request: ${error.message}`);
+        throw error;
+    }
 });
 
 /**
  * @desc Reopen a request (PM/Landlord/Admin)
  * @route PUT /api/requests/:id/reopen
  * @access Private (PropertyManager, Landlord, Admin)
- * @param {string} id - Request ID from URL params
  */
 const reopenRequest = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const currentUser = req.user;
-    const ipAddress = req.ip;
+    try {
+        const { id } = req.params;
+        const currentUser = req.user;
+        const ipAddress = req.ip;
 
-    const updatedRequest = await requestService.reopenRequest(id, currentUser, ipAddress);
+        const updatedRequest = await requestService.reopenRequest(id, currentUser, ipAddress);
 
-    res.status(200).json({
-        success: true,
-        message: 'Request reopened successfully.',
-        request: updatedRequest
-    });
+        res.status(200).json({
+            success: true,
+            message: 'Request reopened successfully.',
+            data: updatedRequest
+        });
+    } catch (error) {
+        logger.error(`RequestController - Error reopening request: ${error.message}`);
+        throw error;
+    }
 });
 
 /**
  * @desc Archive a request (PM/Landlord/Admin)
  * @route PUT /api/requests/:id/archive
  * @access Private (PropertyManager, Landlord, Admin)
- * @param {string} id - Request ID from URL params
  */
 const archiveRequest = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const currentUser = req.user;
-    const ipAddress = req.ip;
+    try {
+        const { id } = req.params;
+        const currentUser = req.user;
+        const ipAddress = req.ip;
 
-    const updatedRequest = await requestService.archiveRequest(id, currentUser, ipAddress);
+        const updatedRequest = await requestService.archiveRequest(id, currentUser, ipAddress);
 
-    res.status(200).json({
-        success: true,
-        message: 'Request archived successfully.',
-        request: updatedRequest
-    });
+        res.status(200).json({
+            success: true,
+            message: 'Request archived successfully.',
+            data: updatedRequest
+        });
+    } catch (error) {
+        logger.error(`RequestController - Error archiving request: ${error.message}`);
+        throw error;
+    }
 });
-
 
 module.exports = {
     createRequest,
@@ -375,5 +421,5 @@ module.exports = {
     publicRequestUpdate,
     verifyRequest,
     reopenRequest,
-    archiveRequest,
+    archiveRequest
 };

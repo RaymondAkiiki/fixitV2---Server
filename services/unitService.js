@@ -1,17 +1,20 @@
 // src/services/unitService.js
 
+const mongoose = require('mongoose');
 const Unit = require('../models/unit');
 const Property = require('../models/property');
-const User = require('../models/user'); // For tenant assignment
+const User = require('../models/user');
 const PropertyUser = require('../models/propertyUser');
 const Request = require('../models/request');
 const ScheduledMaintenance = require('../models/scheduledMaintenance');
 const Notification = require('../models/notification');
-const Comment = require('../models/comment'); // For comments related to units
-const { createAuditLog } = require('./auditService');
-const { createInAppNotification } = require('./notificationService'); // For notifications
+const Comment = require('../models/comment');
+const Lease = require('../models/lease');
+const auditService = require('./auditService');
+const notificationService = require('./notificationService');
 const logger = require('../utils/logger');
 const AppError = require('../utils/AppError');
+
 const {
     ROLE_ENUM,
     PROPERTY_USER_ROLES_ENUM,
@@ -21,530 +24,1109 @@ const {
     NOTIFICATION_TYPE_ENUM
 } = require('../utils/constants/enums');
 
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+
 /**
- * Helper to check if a user has management permission for a given property.
- * Used for authorizing actions like creating/updating units.
- * @param {object} user - The authenticated user object (from req.user).
- * @param {string} propertyId - The ID of the property to check access for.
- * @returns {Promise<boolean>} True if authorized, false otherwise.
+ * Helper to check if a user has management permission for a given property
+ * @param {Object} user - The authenticated user
+ * @param {string} propertyId - The property ID to check access for
+ * @returns {Promise<boolean>} True if authorized
  */
 const checkPropertyManagementPermission = async (user, propertyId) => {
-    if (user.role === ROLE_ENUM.ADMIN) {
-        return true; // Admin has global access
-    }
+    try {
+        if (user.role === ROLE_ENUM.ADMIN) {
+            return true; // Admin has global access
+        }
 
-    // Check if user is a landlord or property manager for the given property
-    const hasAccess = await PropertyUser.exists({
-        user: user._id,
-        property: propertyId,
-        isActive: true,
-        roles: { $in: [PROPERTY_USER_ROLES_ENUM.LANDLORD, PROPERTY_USER_ROLES_ENUM.PROPERTY_MANAGER, PROPERTY_USER_ROLES_ENUM.ADMIN_ACCESS] }
-    });
-    return hasAccess;
+        // Check if user is a landlord, property manager, or has admin access for the property
+        const hasAccess = await PropertyUser.exists({
+            user: user._id,
+            property: propertyId,
+            isActive: true,
+            roles: { $in: [
+                PROPERTY_USER_ROLES_ENUM.LANDLORD, 
+                PROPERTY_USER_ROLES_ENUM.PROPERTY_MANAGER, 
+                PROPERTY_USER_ROLES_ENUM.ADMIN_ACCESS
+            ]}
+        });
+        
+        return !!hasAccess;
+    } catch (error) {
+        logger.error(`UnitService - Error checking property management permission: ${error.message}`, {
+            userId: user?._id,
+            propertyId
+        });
+        return false; // Fail safely
+    }
 };
 
 /**
- * Creates a new unit within a property.
- * @param {string} propertyId - The ID of the property to add the unit to.
- * @param {object} unitData - Data for the new unit.
- * @param {object} currentUser - The user creating the unit (from req.user).
- * @param {string} ipAddress - IP address of the request.
- * @returns {Promise<Unit>} The created unit document.
- * @throws {AppError} If property not found, user not authorized, or validation fails.
+ * Creates a new unit within a property
+ * @param {string} propertyId - Property ID
+ * @param {Object} unitData - Unit data
+ * @param {string} unitData.unitName - Unit name
+ * @param {string} [unitData.floor] - Floor
+ * @param {string} [unitData.details] - Unit details
+ * @param {number} [unitData.numBedrooms] - Number of bedrooms
+ * @param {number} [unitData.numBathrooms] - Number of bathrooms
+ * @param {number} [unitData.squareFootage] - Square footage
+ * @param {number} [unitData.rentAmount] - Rent amount
+ * @param {number} [unitData.depositAmount] - Deposit amount
+ * @param {string} [unitData.status] - Unit status
+ * @param {string} [unitData.utilityResponsibility] - Utility responsibility
+ * @param {string} [unitData.notes] - Notes
+ * @param {Date} [unitData.lastInspected] - Last inspection date
+ * @param {string[]} [unitData.unitImages] - Unit images
+ * @param {string[]} [unitData.amenities] - Unit amenities
+ * @param {Object[]} [unitData.features] - Unit features
+ * @param {Object} currentUser - The authenticated user
+ * @param {string} ipAddress - Request IP address
+ * @returns {Promise<Object>} Created unit
+ * @throws {AppError} On validation or authorization error
  */
 const createUnit = async (propertyId, unitData, currentUser, ipAddress) => {
-    const property = await Property.findById(propertyId);
-    if (!property) {
-        throw new AppError('Property not found.', 404);
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    
+    try {
+        // Verify property exists
+        const property = await Property.findById(propertyId).session(session);
+        if (!property) {
+            throw new AppError('Property not found.', 404);
+        }
+
+        // Authorization check
+        const isAuthorized = await checkPropertyManagementPermission(currentUser, propertyId);
+        if (!isAuthorized) {
+            throw new AppError('Not authorized to create units for this property.', 403);
+        }
+
+        // Validate status if provided
+        if (unitData.status) {
+            if (!UNIT_STATUS_ENUM.includes(unitData.status.toLowerCase())) {
+                throw new AppError(`Invalid unit status: ${unitData.status}. Allowed values: ${UNIT_STATUS_ENUM.join(', ')}`, 400);
+            }
+            unitData.status = unitData.status.toLowerCase();
+        }
+
+        // Create the unit
+        const newUnit = new Unit({
+            property: propertyId,
+            unitName: unitData.unitName,
+            floor: unitData.floor,
+            details: unitData.details,
+            numBedrooms: unitData.numBedrooms,
+            numBathrooms: unitData.numBathrooms,
+            squareFootage: unitData.squareFootage,
+            rentAmount: unitData.rentAmount,
+            depositAmount: unitData.depositAmount,
+            status: unitData.status || 'vacant',
+            utilityResponsibility: unitData.utilityResponsibility,
+            notes: unitData.notes,
+            lastInspected: unitData.lastInspected,
+            nextInspectionDate: unitData.nextInspectionDate,
+            unitImages: unitData.unitImages || [],
+            amenities: unitData.amenities || [],
+            features: unitData.features || []
+        });
+
+        const createdUnit = await newUnit.save({ session });
+
+        // Add unit to the property's units array
+        await Property.findByIdAndUpdate(
+            propertyId,
+            { $push: { units: createdUnit._id } },
+            { session }
+        );
+
+        // Create audit log
+        await auditService.logActivity(
+            AUDIT_ACTION_ENUM.CREATE,
+            AUDIT_RESOURCE_TYPE_ENUM.Unit,
+            createdUnit._id,
+            {
+                userId: currentUser._id,
+                ipAddress,
+                description: `Unit ${createdUnit.unitName} created in property ${property.name} by ${currentUser.email}.`,
+                status: 'success',
+                metadata: {
+                    propertyId,
+                    propertyName: property.name
+                },
+                newValue: createdUnit.toObject()
+            },
+            { session }
+        );
+
+        // Notify property managers and landlords
+        const managersAndLandlords = await PropertyUser.find({
+            property: propertyId,
+            roles: { $in: [PROPERTY_USER_ROLES_ENUM.LANDLORD, PROPERTY_USER_ROLES_ENUM.PROPERTY_MANAGER] },
+            isActive: true,
+            user: { $ne: currentUser._id } // Don't notify the creator
+        }).distinct('user');
+        
+        if (managersAndLandlords.length > 0) {
+            const notificationPromises = managersAndLandlords.map(userId => 
+                notificationService.sendNotification({
+                    recipientId: userId,
+                    type: NOTIFICATION_TYPE_ENUM.UNIT_CREATED,
+                    message: `New unit ${createdUnit.unitName} has been created in property ${property.name}.`,
+                    link: `${FRONTEND_URL}/properties/${propertyId}/units/${createdUnit._id}`,
+                    relatedResourceType: AUDIT_RESOURCE_TYPE_ENUM.Unit,
+                    relatedResourceId: createdUnit._id,
+                    emailDetails: {
+                        subject: `New Unit Created: ${createdUnit.unitName}`,
+                        html: `
+                            <p>A new unit has been created in ${property.name}:</p>
+                            <ul>
+                                <li><strong>Unit Name:</strong> ${createdUnit.unitName}</li>
+                                <li><strong>Bedrooms:</strong> ${createdUnit.numBedrooms || 'N/A'}</li>
+                                <li><strong>Bathrooms:</strong> ${createdUnit.numBathrooms || 'N/A'}</li>
+                                <li><strong>Status:</strong> ${createdUnit.status}</li>
+                            </ul>
+                            <p><a href="${FRONTEND_URL}/properties/${propertyId}/units/${createdUnit._id}">View Unit Details</a></p>
+                        `,
+                        text: `A new unit has been created in ${property.name}: ${createdUnit.unitName}. View details at: ${FRONTEND_URL}/properties/${propertyId}/units/${createdUnit._id}`
+                    },
+                    senderId: currentUser._id
+                }, { session })
+            );
+            
+            await Promise.allSettled(notificationPromises);
+        }
+
+        await session.commitTransaction();
+        
+        logger.info(`UnitService: Unit ${createdUnit.unitName} created in property ${property.name} by ${currentUser.email}.`);
+        
+        // Return the populated unit
+        return Unit.findById(createdUnit._id)
+            .populate('property', 'name address')
+            .populate('tenants', 'firstName lastName email')
+            .populate('unitImages');
+    } catch (error) {
+        await session.abortTransaction();
+        
+        logger.error(`UnitService - Error creating unit: ${error.message}`, {
+            userId: currentUser?._id,
+            propertyId
+        });
+        
+        throw error instanceof AppError ? error : new AppError(`Failed to create unit: ${error.message}`, 500);
+    } finally {
+        session.endSession();
     }
-
-    // Authorization check
-    const isAuthorized = await checkPropertyManagementPermission(currentUser, propertyId);
-    if (!isAuthorized) {
-        throw new AppError('Not authorized to create units for this property.', 403);
-    }
-
-    // Create the unit
-    const newUnit = new Unit({
-        property: propertyId,
-        unitName: unitData.unitName,
-        floor: unitData.floor,
-        details: unitData.details,
-        numBedrooms: unitData.numBedrooms,
-        numBathrooms: unitData.numBathrooms,
-        squareFootage: unitData.squareFootage,
-        rentAmount: unitData.rentAmount,
-        depositAmount: unitData.depositAmount,
-        status: unitData.status || UNIT_STATUS_ENUM.find(s => s === 'vacant'), // Default status
-        utilityResponsibility: unitData.utilityResponsibility,
-        notes: unitData.notes,
-        lastInspected: unitData.lastInspected,
-        unitImages: unitData.unitImages // Assuming this is an array of URLs or media IDs
-    });
-
-    const createdUnit = await newUnit.save();
-
-    // Add unit to the property's units array
-    property.units.push(createdUnit._id);
-    await property.save();
-
-    await createAuditLog({
-        action: AUDIT_ACTION_ENUM.CREATE,
-        user: currentUser._id,
-        resourceType: AUDIT_RESOURCE_TYPE_ENUM.Unit,
-        resourceId: createdUnit._id,
-        newValue: createdUnit.toObject(),
-        ipAddress: ipAddress,
-        description: `Unit ${createdUnit.unitName} created in property ${property.name} by ${currentUser.email}.`,
-        status: 'success'
-    });
-
-    logger.info(`UnitService: Unit ${createdUnit.unitName} created in property ${property.name} by ${currentUser.email}.`);
-    return createdUnit;
 };
 
 /**
- * Lists units for a specific property based on user's access.
- * @param {string} propertyId - The ID of the property.
- * @param {object} currentUser - The authenticated user.
- * @param {object} filters - Query filters (e.g., status, numBedrooms, search).
- * @param {number} page - Page number.
- * @param {number} limit - Items per page.
- * @returns {Promise<object>} Object containing units array, total count, page, and limit.
- * @throws {AppError} If property not found or user not authorized.
+ * Lists units for a specific property with filtering and pagination
+ * @param {string} propertyId - Property ID
+ * @param {Object} currentUser - The authenticated user
+ * @param {Object} filters - Query filters
+ * @param {string} [filters.status] - Filter by unit status
+ * @param {number} [filters.numBedrooms] - Filter by number of bedrooms
+ * @param {string} [filters.search] - Search term
+ * @param {boolean} [filters.vacant=false] - Filter for vacant units only
+ * @param {number} [page=1] - Page number
+ * @param {number} [limit=10] - Items per page
+ * @returns {Promise<Object>} Paginated units with metadata
+ * @throws {AppError} If property not found or unauthorized
  */
 const getUnitsForProperty = async (propertyId, currentUser, filters, page = 1, limit = 10) => {
-    const property = await Property.findById(propertyId);
-    if (!property) {
-        throw new AppError('Property not found.', 404);
-    }
+    try {
+        const property = await Property.findById(propertyId);
+        if (!property) {
+            throw new AppError('Property not found.', 404);
+        }
 
-    let query = { property: propertyId }; // Base query for units in this property
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-
-    // Authorization:
-    // Admin: all units.
-    // Landlord/PM: all units in their managed/owned properties.
-    // Tenant: only their specific unit(s) within that property.
-    if (currentUser.role === ROLE_ENUM.ADMIN) {
-        // Admin has full access
-    } else {
-        const userAssociations = await PropertyUser.find({
-            user: currentUser._id,
+        // Base query for units in this property
+        let query = { 
             property: propertyId,
             isActive: true
-        });
+        };
+        
+        // Parse pagination params
+        const skip = (parseInt(page) - 1) * parseInt(limit);
 
-        if (userAssociations.some(assoc => [PROPERTY_USER_ROLES_ENUM.LANDLORD, PROPERTY_USER_ROLES_ENUM.PROPERTY_MANAGER, PROPERTY_USER_ROLES_ENUM.ADMIN_ACCESS].includes(assoc.roles[0]))) {
-            // Landlord/PM can view all units in their property
-        } else if (currentUser.role === ROLE_ENUM.TENANT) {
-            // Tenant can only view their own unit(s) within this property
-            const tenantUnits = userAssociations.filter(assoc => assoc.roles.includes(PROPERTY_USER_ROLES_ENUM.TENANT) && assoc.unit);
-            if (tenantUnits.length > 0) {
-                query._id = { $in: tenantUnits.map(assoc => assoc.unit) }; // Filter to only tenant's units
+        // Authorization and access control
+        if (currentUser.role === ROLE_ENUM.ADMIN) {
+            // Admin has full access - no additional query filters
+        } else {
+            const userAssociations = await PropertyUser.find({
+                user: currentUser._id,
+                property: propertyId,
+                isActive: true
+            });
+
+            // Check if user is a manager/landlord
+            const isManager = userAssociations.some(assoc => 
+                [PROPERTY_USER_ROLES_ENUM.LANDLORD, PROPERTY_USER_ROLES_ENUM.PROPERTY_MANAGER, PROPERTY_USER_ROLES_ENUM.ADMIN_ACCESS].some(
+                    role => assoc.roles.includes(role)
+                )
+            );
+
+            if (isManager) {
+                // Managers can view all units - no additional query filters
+            } else if (currentUser.role === ROLE_ENUM.TENANT) {
+                // Tenant can only view their own unit(s)
+                const tenantUnits = userAssociations
+                    .filter(assoc => assoc.roles.includes(PROPERTY_USER_ROLES_ENUM.TENANT) && assoc.unit)
+                    .map(assoc => assoc.unit);
+                
+                if (tenantUnits.length === 0) {
+                    throw new AppError('Access denied: You are not associated with any unit in this property.', 403);
+                }
+                
+                query._id = { $in: tenantUnits };
             } else {
-                // Tenant has no unit association for this property
-                throw new AppError('Access denied: You are not associated with any unit in this property.', 403);
+                // Other roles not authorized
+                throw new AppError('Access denied: You do not have permission to list units for this property.', 403);
             }
-        } else {
-            // Other roles (Vendor) are not authorized to list units
-            throw new AppError('Access denied: You do not have permission to list units for this property.', 403);
         }
-    }
 
-    // Apply filters
-    if (filters.status) {
-        if (!UNIT_STATUS_ENUM.includes(filters.status.toLowerCase())) {
-            throw new AppError(`Invalid unit status filter: ${filters.status}`, 400);
+        // Apply filters
+        if (filters.status) {
+            if (!UNIT_STATUS_ENUM.includes(filters.status.toLowerCase())) {
+                throw new AppError(`Invalid unit status filter: ${filters.status}. Allowed values: ${UNIT_STATUS_ENUM.join(', ')}`, 400);
+            }
+            query.status = filters.status.toLowerCase();
         }
-        query.status = filters.status.toLowerCase();
+        
+        if (filters.vacant === 'true' || filters.vacant === true) {
+            query.status = 'vacant';
+        }
+        
+        if (filters.numBedrooms) {
+            query.numBedrooms = parseInt(filters.numBedrooms);
+        }
+        
+        if (filters.search) {
+            query.$or = [
+                { unitName: { $regex: filters.search, $options: 'i' } },
+                { floor: { $regex: filters.search, $options: 'i' } },
+                { details: { $regex: filters.search, $options: 'i' } },
+                { notes: { $regex: filters.search, $options: 'i' } }
+            ];
+        }
+
+        // Execute query with pagination
+        const units = await Unit.find(query)
+            .populate({
+                path: 'tenants',
+                select: 'firstName lastName email avatar'
+            })
+            .populate('unitImages')
+            .sort({ unitName: 1 })
+            .limit(parseInt(limit))
+            .skip(skip);
+
+        const totalUnits = await Unit.countDocuments(query);
+
+        // Log access
+        await auditService.logActivity(
+            AUDIT_ACTION_ENUM.READ_ALL,
+            AUDIT_RESOURCE_TYPE_ENUM.Unit,
+            null,
+            {
+                userId: currentUser._id,
+                description: `User ${currentUser.email} fetched list of units for property ${property.name}.`,
+                status: 'success',
+                metadata: { propertyId, filters, page, limit }
+            }
+        );
+
+        return {
+            units,
+            total: totalUnits,
+            page: parseInt(page),
+            limit: parseInt(limit),
+            pages: Math.ceil(totalUnits / parseInt(limit))
+        };
+    } catch (error) {
+        logger.error(`UnitService - Error getting units for property: ${error.message}`, {
+            userId: currentUser?._id,
+            propertyId
+        });
+        
+        throw error instanceof AppError ? error : new AppError(`Failed to get units: ${error.message}`, 500);
     }
-    if (filters.numBedrooms) {
-        query.numBedrooms = parseInt(filters.numBedrooms);
-    }
-    if (filters.search) {
-        query.$or = [
-            { unitName: { $regex: filters.search, $options: 'i' } },
-            { floor: { $regex: filters.search, $options: 'i' } },
-            { details: { $regex: filters.search, $options: 'i' } },
-        ];
-    }
-
-    const units = await Unit.find(query)
-        .populate('tenants', 'firstName lastName email') // Populate current tenants
-        .sort({ unitName: 1 })
-        .limit(parseInt(limit))
-        .skip(skip);
-
-    const totalUnits = await Unit.countDocuments(query);
-
-    await createAuditLog({
-        action: AUDIT_ACTION_ENUM.READ_ALL,
-        user: currentUser._id,
-        resourceType: AUDIT_RESOURCE_TYPE_ENUM.Unit,
-        ipAddress: currentUser.ip, // Assuming user object might have ip, or pass from req
-        description: `User ${currentUser.email} fetched list of units for property ${property.name}.`,
-        status: 'success',
-        metadata: { propertyId, filters }
-    });
-
-    return {
-        units,
-        total: totalUnits,
-        page: parseInt(page),
-        limit: parseInt(limit)
-    };
 };
 
 /**
- * Gets specific unit details.
- * @param {string} propertyId - The ID of the property the unit belongs to.
- * @param {string} unitId - The ID of the unit to fetch.
- * @param {object} currentUser - The authenticated user.
- * @returns {Promise<Unit>} The unit document.
- * @throws {AppError} If unit not found or user not authorized.
+ * Gets a specific unit by ID
+ * @param {string} propertyId - Property ID
+ * @param {string} unitId - Unit ID
+ * @param {Object} currentUser - The authenticated user
+ * @param {string} [ipAddress] - IP address for audit log
+ * @returns {Promise<Object>} Unit details
+ * @throws {AppError} If unit not found or unauthorized
  */
-const getUnitById = async (propertyId, unitId, currentUser) => {
-    const unit = await Unit.findOne({ _id: unitId, property: propertyId })
-        .populate('property', 'name address')
-        .populate('tenants', 'firstName lastName email');
-
-    if (!unit) {
-        throw new AppError('Unit not found in the specified property.', 404);
-    }
-
-    // Authorization: Similar to listUnits
-    if (currentUser.role === ROLE_ENUM.ADMIN) {
-        // Admin has full access
-    } else {
-        const userAssociations = await PropertyUser.find({
-            user: currentUser._id,
+const getUnitById = async (propertyId, unitId, currentUser, ipAddress) => {
+    try {
+        // Find unit and ensure it belongs to the specified property
+        const unit = await Unit.findOne({ 
+            _id: unitId, 
             property: propertyId,
             isActive: true
-        });
+        })
+            .populate('property', 'name address')
+            .populate('tenants', 'firstName lastName email avatar phone')
+            .populate('unitImages');
 
-        if (userAssociations.some(assoc => [PROPERTY_USER_ROLES_ENUM.LANDLORD, PROPERTY_USER_ROLES_ENUM.PROPERTY_MANAGER, PROPERTY_USER_ROLES_ENUM.ADMIN_ACCESS].includes(assoc.roles[0]))) {
-            // Landlord/PM can view
-        } else if (currentUser.role === ROLE_ENUM.TENANT && unit.tenants.some(tenant => tenant._id.equals(currentUser._id))) {
-            // Tenant can view their own unit
-        } else {
-            throw new AppError('Not authorized to view this unit.', 403);
+        if (!unit) {
+            throw new AppError('Unit not found in the specified property.', 404);
         }
+
+        // Authorization and access control
+        if (currentUser.role === ROLE_ENUM.ADMIN) {
+            // Admin has full access
+        } else {
+            const userAssociations = await PropertyUser.find({
+                user: currentUser._id,
+                property: propertyId,
+                isActive: true
+            });
+
+            // Check if user is a manager/landlord
+            const isManager = userAssociations.some(assoc => 
+                [PROPERTY_USER_ROLES_ENUM.LANDLORD, PROPERTY_USER_ROLES_ENUM.PROPERTY_MANAGER, PROPERTY_USER_ROLES_ENUM.ADMIN_ACCESS].some(
+                    role => assoc.roles.includes(role)
+                )
+            );
+
+            if (isManager) {
+                // Managers can view all units
+            } else if (currentUser.role === ROLE_ENUM.TENANT) {
+                // Check if tenant is associated with this unit
+                const isTenantOfUnit = userAssociations.some(assoc => 
+                    assoc.roles.includes(PROPERTY_USER_ROLES_ENUM.TENANT) && 
+                    assoc.unit && 
+                    assoc.unit.toString() === unitId
+                );
+                
+                if (!isTenantOfUnit) {
+                    throw new AppError('Access denied: You are not associated with this unit.', 403);
+                }
+            } else {
+                // Other roles not authorized
+                throw new AppError('Access denied: You do not have permission to view this unit.', 403);
+            }
+        }
+
+        // Get maintenance requests for this unit
+        const maintenanceRequests = await Request.find({
+            unit: unitId,
+            status: { $nin: ['completed', 'cancelled'] }
+        })
+            .select('title status priority createdAt')
+            .sort({ createdAt: -1 })
+            .limit(5);
+
+        // Get scheduled maintenance for this unit
+        const scheduledMaintenance = await ScheduledMaintenance.find({
+            unit: unitId,
+            status: { $nin: ['completed', 'cancelled'] }
+        })
+            .select('title status scheduledDate createdAt')
+            .sort({ scheduledDate: 1 })
+            .limit(5);
+
+        // Get tenant details with lease information
+        const tenantDetails = await Promise.all(unit.tenants.map(async tenant => {
+            const propertyUser = await PropertyUser.findOne({
+                user: tenant._id,
+                property: propertyId,
+                unit: unitId,
+                roles: PROPERTY_USER_ROLES_ENUM.TENANT,
+                isActive: true
+            });
+            
+            return {
+                _id: tenant._id,
+                firstName: tenant.firstName,
+                lastName: tenant.lastName,
+                email: tenant.email,
+                avatar: tenant.avatar,
+                phone: tenant.phone,
+                leaseInfo: propertyUser?.leaseInfo || null,
+                startDate: propertyUser?.startDate || null
+            };
+        }));
+
+        // Log access if IP address provided
+        if (ipAddress) {
+            await auditService.logActivity(
+                AUDIT_ACTION_ENUM.READ,
+                AUDIT_RESOURCE_TYPE_ENUM.Unit,
+                unit._id,
+                {
+                    userId: currentUser._id,
+                    ipAddress,
+                    description: `User ${currentUser.email} viewed unit ${unit.unitName} in property ${unit.property.name}.`,
+                    status: 'success'
+                }
+            );
+        }
+
+        // Return unit with additional information
+        return {
+            ...unit.toObject(),
+            tenantDetails,
+            maintenanceRequests,
+            scheduledMaintenance
+        };
+    } catch (error) {
+        logger.error(`UnitService - Error getting unit by ID: ${error.message}`, {
+            userId: currentUser?._id,
+            propertyId,
+            unitId
+        });
+        
+        throw error instanceof AppError ? error : new AppError(`Failed to get unit details: ${error.message}`, 500);
     }
-
-    await createAuditLog({
-        action: AUDIT_ACTION_ENUM.READ,
-        user: currentUser._id,
-        resourceType: AUDIT_RESOURCE_TYPE_ENUM.Unit,
-        resourceId: unit._id,
-        ipAddress: currentUser.ip,
-        description: `User ${currentUser.email} fetched details for unit ${unit.unitName} in property ${unit.property.name}.`,
-        status: 'success'
-    });
-
-    return unit;
 };
 
 /**
- * Updates unit details.
- * @param {string} propertyId - The ID of the property the unit belongs to.
- * @param {string} unitId - The ID of the unit to update.
- * @param {object} updateData - Data to update the unit with.
- * @param {object} currentUser - The user performing the update.
- * @param {string} ipAddress - IP address of the request.
- * @returns {Promise<Unit>} The updated unit document.
- * @throws {AppError} If unit not found, user not authorized, or validation fails.
+ * Updates a unit
+ * @param {string} propertyId - Property ID
+ * @param {string} unitId - Unit ID
+ * @param {Object} updateData - Update data
+ * @param {Object} currentUser - The authenticated user
+ * @param {string} ipAddress - Request IP address
+ * @returns {Promise<Object>} Updated unit
+ * @throws {AppError} If unit not found or unauthorized
  */
 const updateUnit = async (propertyId, unitId, updateData, currentUser, ipAddress) => {
-    const unit = await Unit.findOne({ _id: unitId, property: propertyId });
-    if (!unit) {
-        throw new AppError('Unit not found in the specified property.', 404);
-    }
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    
+    try {
+        // Find unit and ensure it belongs to the specified property
+        const unit = await Unit.findOne({ 
+            _id: unitId, 
+            property: propertyId,
+            isActive: true
+        }).session(session);
 
-    // Authorization: Admin, or Landlord/PM associated with the property
-    const isAuthorized = await checkPropertyManagementPermission(currentUser, propertyId);
-    if (!isAuthorized) {
-        throw new AppError('Not authorized to update this unit.', 403);
-    }
+        if (!unit) {
+            throw new AppError('Unit not found in the specified property.', 404);
+        }
 
-    const oldUnit = unit.toObject(); // Capture old state for audit log
+        // Authorization check
+        const isAuthorized = await checkPropertyManagementPermission(currentUser, propertyId);
+        if (!isAuthorized) {
+            throw new AppError('Not authorized to update this unit.', 403);
+        }
 
-    // Apply updates
-    Object.keys(updateData).forEach(key => {
-        if (updateData[key] !== undefined) {
-            if (key === 'status') {
-                if (!UNIT_STATUS_ENUM.includes(updateData[key].toLowerCase())) {
-                    throw new AppError(`Invalid unit status: ${updateData[key]}. Allowed: ${UNIT_STATUS_ENUM.join(', ')}`, 400);
+        // Store original unit for audit log
+        const oldUnit = unit.toObject();
+
+        // Apply updates with validation
+        const updatableFields = [
+            'unitName', 'floor', 'details', 'numBedrooms', 'numBathrooms', 
+            'squareFootage', 'rentAmount', 'depositAmount', 'status', 
+            'utilityResponsibility', 'notes', 'lastInspected', 'nextInspectionDate',
+            'unitImages', 'amenities', 'features'
+        ];
+        
+        for (const field of updatableFields) {
+            if (updateData[field] !== undefined) {
+                // Special handling for enum fields
+                if (field === 'status') {
+                    if (!UNIT_STATUS_ENUM.includes(updateData[field].toLowerCase())) {
+                        throw new AppError(`Invalid unit status: ${updateData[field]}. Allowed values: ${UNIT_STATUS_ENUM.join(', ')}`, 400);
+                    }
+                    unit[field] = updateData[field].toLowerCase();
+                } 
+                else if (field === 'utilityResponsibility') {
+                    unit[field] = updateData[field].toLowerCase();
                 }
-                unit[key] = updateData[key].toLowerCase();
-            } else if (key === 'utilityResponsibility') {
-                // Assuming UTILITY_RESPONSIBILITY_ENUM exists and is imported
-                // if (!UTILITY_RESPONSIBILITY_ENUM.includes(updateData[key].toLowerCase())) {
-                //     throw new AppError(`Invalid utility responsibility: ${updateData[key]}. Allowed: ${UTILITY_RESPONSIBILITY_ENUM.join(', ')}`, 400);
-                // }
-                unit[key] = updateData[key].toLowerCase();
-            }
-            else {
-                unit[key] = updateData[key];
+                else {
+                    unit[field] = updateData[field];
+                }
             }
         }
-    });
 
-    const updatedUnit = await unit.save();
+        // Save changes
+        const updatedUnit = await unit.save({ session });
 
-    await createAuditLog({
-        action: AUDIT_ACTION_ENUM.UPDATE,
-        user: currentUser._id,
-        resourceType: AUDIT_RESOURCE_TYPE_ENUM.Unit,
-        resourceId: updatedUnit._id,
-        oldValue: oldUnit,
-        newValue: updatedUnit.toObject(),
-        ipAddress: ipAddress,
-        description: `Unit ${updatedUnit.unitName} in property ${propertyId} updated by ${currentUser.email}.`,
-        status: 'success'
-    });
+        // Check if unit status changed to 'occupied' or 'vacant'
+        const statusChanged = oldUnit.status !== updatedUnit.status;
+        
+        // Create audit log
+        await auditService.logActivity(
+            AUDIT_ACTION_ENUM.UPDATE,
+            AUDIT_RESOURCE_TYPE_ENUM.Unit,
+            updatedUnit._id,
+            {
+                userId: currentUser._id,
+                ipAddress,
+                description: `Unit ${updatedUnit.unitName} in property ${propertyId} updated by ${currentUser.email}.`,
+                status: 'success',
+                oldValue: oldUnit,
+                newValue: updatedUnit.toObject(),
+                metadata: {
+                    statusChanged,
+                    oldStatus: oldUnit.status,
+                    newStatus: updatedUnit.status
+                }
+            },
+            { session }
+        );
 
-    logger.info(`UnitService: Unit ${updatedUnit.unitName} updated by ${currentUser.email}.`);
-    return updatedUnit;
+        // If status changed to 'occupied' or 'vacant', notify relevant parties
+        if (statusChanged) {
+            // Get property details for notification
+            const property = await Property.findById(propertyId).session(session);
+            
+            // Get users to notify (property managers & landlords)
+            const userIdsToNotify = await PropertyUser.find({
+                property: propertyId,
+                roles: { $in: [PROPERTY_USER_ROLES_ENUM.LANDLORD, PROPERTY_USER_ROLES_ENUM.PROPERTY_MANAGER] },
+                isActive: true,
+                user: { $ne: currentUser._id } // Don't notify the updater
+            }).distinct('user');
+            
+            if (userIdsToNotify.length > 0) {
+                const notificationPromises = userIdsToNotify.map(userId => 
+                    notificationService.sendNotification({
+                        recipientId: userId,
+                        type: NOTIFICATION_TYPE_ENUM.UNIT_STATUS_CHANGED,
+                        message: `Unit ${updatedUnit.unitName} in ${property.name} is now ${updatedUnit.status}.`,
+                        link: `${FRONTEND_URL}/properties/${propertyId}/units/${unitId}`,
+                        relatedResourceType: AUDIT_RESOURCE_TYPE_ENUM.Unit,
+                        relatedResourceId: unitId,
+                        emailDetails: {
+                            subject: `Unit Status Update: ${updatedUnit.unitName}`,
+                            html: `
+                                <p>The status of unit ${updatedUnit.unitName} in ${property.name} has been changed from "${oldUnit.status}" to "${updatedUnit.status}".</p>
+                                <p><a href="${FRONTEND_URL}/properties/${propertyId}/units/${unitId}">View Unit Details</a></p>
+                            `,
+                            text: `The status of unit ${updatedUnit.unitName} in ${property.name} has been changed from "${oldUnit.status}" to "${updatedUnit.status}". View details at: ${FRONTEND_URL}/properties/${propertyId}/units/${unitId}`
+                        },
+                        senderId: currentUser._id
+                    }, { session })
+                );
+                
+                await Promise.allSettled(notificationPromises);
+            }
+            
+            // Also notify tenants if occupied
+            if (updatedUnit.status === 'occupied' && updatedUnit.tenants && updatedUnit.tenants.length > 0) {
+                const tenantNotificationPromises = updatedUnit.tenants.map(tenantId => 
+                    notificationService.sendNotification({
+                        recipientId: tenantId,
+                        type: NOTIFICATION_TYPE_ENUM.UNIT_STATUS_CHANGED,
+                        message: `Your unit ${updatedUnit.unitName} in ${property.name} is now marked as ${updatedUnit.status}.`,
+                        link: `${FRONTEND_URL}/properties/${propertyId}/units/${unitId}`,
+                        relatedResourceType: AUDIT_RESOURCE_TYPE_ENUM.Unit,
+                        relatedResourceId: unitId,
+                        emailDetails: {
+                            subject: `Your Unit Status Update: ${updatedUnit.unitName}`,
+                            html: `
+                                <p>Your unit ${updatedUnit.unitName} in ${property.name} is now marked as ${updatedUnit.status}.</p>
+                                <p><a href="${FRONTEND_URL}/properties/${propertyId}/units/${unitId}">View Unit Details</a></p>
+                            `,
+                            text: `Your unit ${updatedUnit.unitName} in ${property.name} is now marked as ${updatedUnit.status}. View details at: ${FRONTEND_URL}/properties/${propertyId}/units/${unitId}`
+                        },
+                        senderId: currentUser._id
+                    }, { session })
+                );
+                
+                await Promise.allSettled(tenantNotificationPromises);
+            }
+        }
+
+        await session.commitTransaction();
+        
+        logger.info(`UnitService: Unit ${updatedUnit.unitName} updated by ${currentUser.email}.`);
+        
+        // Return populated unit
+        return Unit.findById(updatedUnit._id)
+            .populate('property', 'name address')
+            .populate('tenants', 'firstName lastName email')
+            .populate('unitImages');
+    } catch (error) {
+        await session.abortTransaction();
+        
+        logger.error(`UnitService - Error updating unit: ${error.message}`, {
+            userId: currentUser?._id,
+            propertyId,
+            unitId
+        });
+        
+        throw error instanceof AppError ? error : new AppError(`Failed to update unit: ${error.message}`, 500);
+    } finally {
+        session.endSession();
+    }
 };
 
 /**
- * Deletes a unit and cleans up related references.
- * @param {string} propertyId - The ID of the property the unit belongs to.
- * @param {string} unitId - The ID of the unit to delete.
- * @param {object} currentUser - The user performing the deletion.
- * @param {string} ipAddress - IP address of the request.
+ * Deletes a unit (soft delete if has history, hard delete if new)
+ * @param {string} propertyId - Property ID
+ * @param {string} unitId - Unit ID
+ * @param {Object} currentUser - The authenticated user
+ * @param {string} ipAddress - Request IP address
  * @returns {Promise<void>}
- * @throws {AppError} If unit not found, user not authorized, or dependent data exists.
+ * @throws {AppError} If unit not found or has dependencies
  */
 const deleteUnit = async (propertyId, unitId, currentUser, ipAddress) => {
-    const unitToDelete = await Unit.findOne({ _id: unitId, property: propertyId });
-    if (!unitToDelete) {
-        throw new AppError('Unit not found in the specified property.', 404);
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    
+    try {
+        // Find unit and ensure it belongs to the specified property
+        const unitToDelete = await Unit.findOne({ 
+            _id: unitId, 
+            property: propertyId 
+        }).session(session);
+
+        if (!unitToDelete) {
+            throw new AppError('Unit not found in the specified property.', 404);
+        }
+
+        // Authorization check
+        const isAuthorized = await checkPropertyManagementPermission(currentUser, propertyId);
+        if (!isAuthorized) {
+            throw new AppError('Not authorized to delete this unit.', 403);
+        }
+
+        // Check for dependencies
+        const hasRequests = await Request.countDocuments({ unit: unitId }).session(session);
+        const hasScheduledMaintenance = await ScheduledMaintenance.countDocuments({ unit: unitId }).session(session);
+        const hasActivePropertyUsers = await PropertyUser.countDocuments({ 
+            unit: unitId, 
+            isActive: true 
+        }).session(session);
+
+        // Store unit data for audit log
+        const oldUnit = unitToDelete.toObject();
+
+        if (hasRequests > 0 || hasScheduledMaintenance > 0 || hasActivePropertyUsers > 0) {
+            // Unit has history - perform soft delete
+            unitToDelete.isActive = false;
+            await unitToDelete.save({ session });
+            
+            // Deactivate PropertyUser associations for this unit
+            await PropertyUser.updateMany(
+                { unit: unitId, isActive: true },
+                { 
+                    $set: { 
+                        isActive: false,
+                        endDate: new Date()
+                    } 
+                },
+                { session }
+            );
+            
+            logger.info(`UnitService: Soft deleted unit ${unitToDelete.unitName} and deactivated PropertyUser associations.`);
+        } else {
+            // No history - perform hard delete
+            
+            // Remove unit from property's units array
+            await Property.findByIdAndUpdate(
+                propertyId,
+                { $pull: { units: unitId } },
+                { session }
+            );
+            
+            // Delete PropertyUser associations for this unit
+            await PropertyUser.deleteMany({ unit: unitId }, { session });
+            
+            // Delete comments associated with this unit
+            await Comment.deleteMany({ 
+                contextId: unitId, 
+                contextType: AUDIT_RESOURCE_TYPE_ENUM.Unit 
+            }, { session });
+            
+            // Delete notifications related to this unit
+            await Notification.deleteMany({ 
+                'relatedResource.item': unitId, 
+                'relatedResource.kind': AUDIT_RESOURCE_TYPE_ENUM.Unit 
+            }, { session });
+            
+            // Delete the unit
+            await unitToDelete.deleteOne({ session });
+            
+            logger.info(`UnitService: Hard deleted unit ${unitToDelete.unitName} and removed all dependencies.`);
+        }
+
+        // Create audit log
+        await auditService.logActivity(
+            AUDIT_ACTION_ENUM.DELETE,
+            AUDIT_RESOURCE_TYPE_ENUM.Unit,
+            unitId,
+            {
+                userId: currentUser._id,
+                ipAddress,
+                description: `Unit ${oldUnit.unitName} in property ${propertyId} deleted by ${currentUser.email}.`,
+                status: 'success',
+                oldValue: oldUnit,
+                newValue: null,
+                metadata: {
+                    softDelete: hasRequests > 0 || hasScheduledMaintenance > 0 || hasActivePropertyUsers > 0
+                }
+            },
+            { session }
+        );
+
+        await session.commitTransaction();
+        
+        logger.info(`UnitService: Unit ${oldUnit.unitName} deleted by ${currentUser.email}.`);
+    } catch (error) {
+        await session.abortTransaction();
+        
+        logger.error(`UnitService - Error deleting unit: ${error.message}`, {
+            userId: currentUser?._id,
+            propertyId,
+            unitId
+        });
+        
+        throw error instanceof AppError ? error : new AppError(`Failed to delete unit: ${error.message}`, 500);
+    } finally {
+        session.endSession();
     }
-
-    // Authorization: Admin, or Landlord/PM associated with the property
-    const isAuthorized = await checkPropertyManagementPermission(currentUser, propertyId);
-    if (!isAuthorized) {
-        throw new AppError('Not authorized to delete this unit.', 403);
-    }
-
-    // Check for existing requests or scheduled maintenance for this unit
-    const hasRequests = await Request.countDocuments({ unit: unitId });
-    const hasScheduledMaintenance = await ScheduledMaintenance.countDocuments({ unit: unitId });
-    const hasActiveLeases = await Lease.countDocuments({ unit: unitId, status: { $in: ['active', 'pending_renewal'] } }); // Assuming Lease model and relevant statuses
-
-    if (hasRequests > 0 || hasScheduledMaintenance > 0 || hasActiveLeases > 0) {
-        throw new AppError('Cannot delete unit with associated requests, scheduled maintenance, or active leases. Please resolve or delete them first.', 400);
-    }
-
-    const oldUnit = unitToDelete.toObject(); // Capture for audit log
-
-    // --- Cleanup related data ---
-    // 1. Remove unit from parent property's units array
-    await Property.findByIdAndUpdate(propertyId, { $pull: { units: unitId } });
-    logger.info(`UnitService: Removed unit ${unitToDelete.unitName} from property ${propertyId}'s units array.`);
-
-    // 2. Remove all PropertyUser associations for this unit
-    await PropertyUser.deleteMany({ unit: unitId });
-    logger.info(`UnitService: Deleted PropertyUser associations for unit ${unitToDelete.unitName}.`);
-
-    // 3. Delete comments associated with this unit
-    await Comment.deleteMany({ contextId: unitId, contextType: AUDIT_RESOURCE_TYPE_ENUM.Unit });
-    logger.info(`UnitService: Deleted comments for unit ${unitToDelete.unitName}.`);
-
-    // 4. Delete notifications related to this unit
-    await Notification.deleteMany({ 'relatedResource.item': unitId, 'relatedResource.kind': AUDIT_RESOURCE_TYPE_ENUM.Unit });
-    logger.info(`UnitService: Deleted notifications for unit ${unitToDelete.unitName}.`);
-
-    // 5. Finally, delete the unit document
-    await unitToDelete.deleteOne();
-
-    await createAuditLog({
-        action: AUDIT_ACTION_ENUM.DELETE,
-        user: currentUser._id,
-        resourceType: AUDIT_RESOURCE_TYPE_ENUM.Unit,
-        resourceId: unitId,
-        oldValue: oldUnit,
-        newValue: null,
-        ipAddress: ipAddress,
-        description: `Unit ${oldUnit.unitName} in property ${propertyId} deleted by ${currentUser.email}.`,
-        status: 'success'
-    });
-
-    logger.info(`UnitService: Unit ${oldUnit.unitName} deleted by ${currentUser.email}.`);
 };
 
 /**
- * Assigns a tenant to a unit (adds/updates PropertyUser association).
- * @param {string} propertyId - The ID of the property.
- * @param {string} unitId - The ID of the unit.
- * @param {string} tenantId - The ID of the User to assign as tenant.
- * @param {object} currentUser - The user performing the assignment.
- * @param {string} ipAddress - IP address of the request.
- * @returns {Promise<Unit>} The updated unit document.
- * @throws {AppError} If entities not found, user not authorized, or tenant already assigned.
+ * Assigns a tenant to a unit
+ * @param {string} propertyId - Property ID
+ * @param {string} unitId - Unit ID
+ * @param {string} tenantId - Tenant user ID
+ * @param {Object} currentUser - The authenticated user
+ * @param {string} ipAddress - Request IP address
+ * @returns {Promise<Object>} Updated unit
+ * @throws {AppError} If entities not found or unauthorized
  */
 const assignTenantToUnit = async (propertyId, unitId, tenantId, currentUser, ipAddress) => {
-    const property = await Property.findById(propertyId);
-    const unit = await Unit.findById(unitId);
-    const tenantUser = await User.findById(tenantId);
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    
+    try {
+        // Find entities and validate
+        const property = await Property.findById(propertyId).session(session);
+        const unit = await Unit.findById(unitId).session(session);
+        const tenantUser = await User.findById(tenantId).session(session);
 
-    if (!property || !unit || !tenantUser) {
-        throw new AppError('Property, unit, or tenant user not found.', 404);
-    }
+        if (!property || !unit || !tenantUser) {
+            throw new AppError(`${!property ? 'Property' : !unit ? 'Unit' : 'Tenant user'} not found.`, 404);
+        }
 
-    // Ensure unit belongs to the property
-    if (unit.property.toString() !== propertyId) {
-        throw new AppError('Unit does not belong to the specified property.', 400);
-    }
+        // Ensure unit belongs to the property
+        if (unit.property.toString() !== propertyId) {
+            throw new AppError('Unit does not belong to the specified property.', 400);
+        }
 
-    // Ensure the assigned user is actually a 'tenant' role
-    if (tenantUser.role !== ROLE_ENUM.TENANT) {
-        throw new AppError('Assigned user must have the role of "tenant".', 400);
-    }
+        // Ensure the assigned user is a tenant role
+        if (tenantUser.role !== ROLE_ENUM.TENANT) {
+            throw new AppError('Assigned user must have the role of "tenant".', 400);
+        }
 
-    // Authorization: Admin, or Landlord/PM associated with the property
-    const isAuthorized = await checkPropertyManagementPermission(currentUser, propertyId);
-    if (!isAuthorized) {
-        throw new AppError('Not authorized to assign tenants to this unit.', 403);
-    }
+        // Authorization check
+        const isAuthorized = await checkPropertyManagementPermission(currentUser, propertyId);
+        if (!isAuthorized) {
+            throw new AppError('Not authorized to assign tenants to this unit.', 403);
+        }
 
-    // Check if the tenant is already assigned to this unit
-    if (unit.tenants.includes(tenantId)) {
-        throw new AppError('Tenant is already assigned to this unit.', 400);
-    }
+        // Check if tenant is already assigned to this unit
+        const alreadyAssigned = unit.tenants && unit.tenants.some(id => id.toString() === tenantId);
+        if (alreadyAssigned) {
+            throw new AppError('Tenant is already assigned to this unit.', 400);
+        }
 
-    // Check for and update existing tenancy in the same property (if tenant can only be in one unit per property)
-    const existingTenancyInProperty = await PropertyUser.findOne({
-        user: tenantId,
-        property: propertyId,
-        roles: PROPERTY_USER_ROLES_ENUM.TENANT,
-        isActive: true,
-        unit: { $ne: null } // Find if they are tenant of any unit in this property
-    });
-
-    if (existingTenancyInProperty) {
-        // Reassign: pull from old unit, push to new
-        await Unit.findByIdAndUpdate(existingTenancyInProperty.unit, { $pull: { tenants: tenantId } });
-        logger.info(`UnitService: Reassigning tenant ${tenantUser.email} from unit ${existingTenancyInProperty.unit} to ${unit.unitName}.`);
-        // Update the existing PropertyUser entry for this tenant's unit
-        existingTenancyInProperty.unit = unitId;
-        await existingTenancyInProperty.save();
-    } else {
-        // Create a new PropertyUser entry if none exists for this tenant-property combination
-        await PropertyUser.create({
+        // Check for existing tenancy in the same property
+        const existingTenancy = await PropertyUser.findOne({
             user: tenantId,
             property: propertyId,
-            unit: unitId,
-            roles: [PROPERTY_USER_ROLES_ENUM.TENANT],
-            invitedBy: currentUser._id, // Record who assigned them
+            roles: PROPERTY_USER_ROLES_ENUM.TENANT,
             isActive: true,
-            startDate: new Date()
+            unit: { $ne: null, $ne: unitId }
+        }).session(session);
+
+        if (existingTenancy) {
+            // Handle tenant reassignment
+            const oldUnitId = existingTenancy.unit;
+            
+            // Remove tenant from old unit
+            await Unit.findByIdAndUpdate(
+                oldUnitId,
+                { $pull: { tenants: tenantId } },
+                { session }
+            );
+            
+            logger.info(`UnitService: Removing tenant ${tenantUser.email} from unit ${oldUnitId}.`);
+            
+            // Update PropertyUser record to point to new unit
+            existingTenancy.unit = unitId;
+            await existingTenancy.save({ session });
+            
+            // Notify tenant about unit change
+            try {
+                const oldUnit = await Unit.findById(oldUnitId).session(session);
+                
+                await notificationService.sendNotification({
+                    recipientId: tenantId,
+                    type: NOTIFICATION_TYPE_ENUM.UNIT_REASSIGNED,
+                    message: `You have been moved from unit ${oldUnit.unitName} to ${unit.unitName} in ${property.name}.`,
+                    link: `${FRONTEND_URL}/properties/${propertyId}/units/${unitId}`,
+                    relatedResourceType: AUDIT_RESOURCE_TYPE_ENUM.Unit,
+                    relatedResourceId: unitId,
+                    emailDetails: {
+                        subject: `Unit Change Notification`,
+                        html: `
+                            <p>Hello ${tenantUser.firstName},</p>
+                            <p>Your unit assignment has been changed from ${oldUnit.unitName} to ${unit.unitName} in ${property.name}.</p>
+                            <p><a href="${FRONTEND_URL}/properties/${propertyId}/units/${unitId}">View Your New Unit</a></p>
+                        `,
+                        text: `Hello ${tenantUser.firstName}, Your unit assignment has been changed from ${oldUnit.unitName} to ${unit.unitName} in ${property.name}. View your new unit at: ${FRONTEND_URL}/properties/${propertyId}/units/${unitId}`
+                    },
+                    senderId: currentUser._id
+                }, { session });
+            } catch (notificationError) {
+                logger.warn(`Failed to send unit reassignment notification: ${notificationError.message}`);
+                // Continue even if notification fails
+            }
+        } else {
+            // Create a new PropertyUser entry
+            await PropertyUser.create([{
+                user: tenantId,
+                property: propertyId,
+                unit: unitId,
+                roles: [PROPERTY_USER_ROLES_ENUM.TENANT],
+                invitedBy: currentUser._id,
+                isActive: true,
+                startDate: new Date()
+            }], { session });
+            
+            logger.info(`UnitService: Created PropertyUser association for tenant ${tenantUser.email} to unit ${unit.unitName}.`);
+            
+            // Notify tenant about new unit assignment
+            try {
+                await notificationService.sendNotification({
+                    recipientId: tenantId,
+                    type: NOTIFICATION_TYPE_ENUM.UNIT_ASSIGNED,
+                    message: `You have been assigned to unit ${unit.unitName} in ${property.name}.`,
+                    link: `${FRONTEND_URL}/properties/${propertyId}/units/${unitId}`,
+                    relatedResourceType: AUDIT_RESOURCE_TYPE_ENUM.Unit,
+                    relatedResourceId: unitId,
+                    emailDetails: {
+                        subject: `Unit Assignment Notification`,
+                        html: `
+                            <p>Hello ${tenantUser.firstName},</p>
+                            <p>You have been assigned to unit ${unit.unitName} in ${property.name}.</p>
+                            <p><a href="${FRONTEND_URL}/properties/${propertyId}/units/${unitId}">View Your Unit</a></p>
+                        `,
+                        text: `Hello ${tenantUser.firstName}, You have been assigned to unit ${unit.unitName} in ${property.name}. View your unit at: ${FRONTEND_URL}/properties/${propertyId}/units/${unitId}`
+                    },
+                    senderId: currentUser._id
+                }, { session });
+            } catch (notificationError) {
+                logger.warn(`Failed to send unit assignment notification: ${notificationError.message}`);
+                // Continue even if notification fails
+            }
+        }
+
+        // Add tenant to the unit's tenants array
+        if (!unit.tenants) {
+            unit.tenants = [];
+        }
+        
+        unit.tenants.push(tenantId);
+        
+        // If unit was vacant, change status to occupied
+        if (unit.status === 'vacant') {
+            unit.status = 'occupied';
+        }
+        
+        const updatedUnit = await unit.save({ session });
+
+        // Create audit log
+        await auditService.logActivity(
+            AUDIT_ACTION_ENUM.ASSIGN_TENANT,
+            AUDIT_RESOURCE_TYPE_ENUM.Unit,
+            unitId,
+            {
+                userId: currentUser._id,
+                ipAddress,
+                description: `Tenant ${tenantUser.email} assigned to unit ${unit.unitName} by ${currentUser.email}.`,
+                status: 'success',
+                metadata: {
+                    tenantId,
+                    unitId,
+                    propertyId,
+                    wasReassigned: !!existingTenancy
+                },
+                newValue: { tenantId, unitId, propertyId }
+            },
+            { session }
+        );
+
+        await session.commitTransaction();
+        
+        logger.info(`UnitService: Tenant ${tenantUser.email} assigned to unit ${unit.unitName} by ${currentUser.email}.`);
+        
+        // Return populated unit
+        return Unit.findById(updatedUnit._id)
+            .populate('property', 'name address')
+            .populate('tenants', 'firstName lastName email avatar')
+            .populate('unitImages');
+    } catch (error) {
+        await session.abortTransaction();
+        
+        logger.error(`UnitService - Error assigning tenant to unit: ${error.message}`, {
+            userId: currentUser?._id,
+            propertyId,
+            unitId,
+            tenantId
         });
-        logger.info(`UnitService: Created new PropertyUser association for tenant ${tenantUser.email} to unit ${unit.unitName}.`);
+        
+        throw error instanceof AppError ? error : new AppError(`Failed to assign tenant to unit: ${error.message}`, 500);
+    } finally {
+        session.endSession();
     }
-
-    // Add tenant to the Unit's tenants array
-    unit.tenants.push(tenantId);
-    const updatedUnit = await unit.save();
-
-    // Send notification to the tenant
-    await createInAppNotification(
-        tenantId,
-        NOTIFICATION_TYPE_ENUM.find(t => t === 'unit_assigned'),
-        `You have been assigned to unit ${unit.unitName} in ${property.name}.`,
-        { kind: AUDIT_RESOURCE_TYPE_ENUM.Unit, item: unitId },
-        `${process.env.FRONTEND_URL}/properties/${propertyId}/units/${unitId}`,
-        { unitName: unit.unitName, propertyName: property.name },
-        currentUser._id
-    );
-
-    await createAuditLog({
-        action: AUDIT_ACTION_ENUM.ASSIGN_TENANT,
-        user: currentUser._id,
-        resourceType: AUDIT_RESOURCE_TYPE_ENUM.Unit,
-        resourceId: unitId,
-        newValue: { tenantId, unitId, propertyId },
-        ipAddress: ipAddress,
-        description: `Tenant ${tenantUser.email} assigned to unit ${unit.unitName} by ${currentUser.email}.`,
-        status: 'success'
-    });
-
-    return updatedUnit;
 };
 
 /**
- * Removes a tenant from a unit (updates PropertyUser association).
- * @param {string} propertyId - The ID of the property.
- * @param {string} unitId - The ID of the unit.
- * @param {string} tenantId - The ID of the User to remove.
- * @param {object} currentUser - The user performing the removal.
- * @param {string} ipAddress - IP address of the request.
- * @returns {Promise<Unit>} The updated unit document.
- * @throws {AppError} If entities not found, user not authorized, or tenant not assigned.
+ * Removes a tenant from a unit
+ * @param {string} propertyId - Property ID
+ * @param {string} unitId - Unit ID
+ * @param {string} tenantId - Tenant user ID
+ * @param {Object} currentUser - The authenticated user
+ * @param {string} ipAddress - Request IP address
+ * @returns {Promise<Object>} Updated unit
+ * @throws {AppError} If entities not found or unauthorized
  */
 const removeTenantFromUnit = async (propertyId, unitId, tenantId, currentUser, ipAddress) => {
-    const property = await Property.findById(propertyId);
-    const unit = await Unit.findById(unitId);
-    const tenantUser = await User.findById(tenantId);
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    
+    try {
+        // Find entities and validate
+        const property = await Property.findById(propertyId).session(session);
+        const unit = await Unit.findById(unitId).session(session);
+        const tenantUser = await User.findById(tenantId).session(session);
 
-    if (!property || !unit || !tenantUser) {
-        throw new AppError('Property, unit, or tenant user not found.', 404);
+        if (!property || !unit || !tenantUser) {
+            throw new AppError(`${!property ? 'Property' : !unit ? 'Unit' : 'Tenant user'} not found.`, 404);
+        }
+
+        // Ensure unit belongs to the property
+        if (unit.property.toString() !== propertyId) {
+            throw new AppError('Unit does not belong to the specified property.', 400);
+        }
+
+        // Authorization check
+        const isAuthorized = await checkPropertyManagementPermission(currentUser, propertyId);
+        if (!isAuthorized) {
+            throw new AppError('Not authorized to remove tenants from this unit.', 403);
+        }
+
+        // Check if tenant is actually assigned to this unit
+        const isTenantAssigned = unit.tenants && unit.tenants.some(id => id.toString() === tenantId);
+        if (!isTenantAssigned) {
+            throw new AppError('Tenant is not assigned to this unit.', 400);
+        }
+
+        // Remove tenant from the unit's tenants array
+        unit.tenants = unit.tenants.filter(id => id.toString() !== tenantId);
+        
+        // If no tenants left, change status to vacant
+        if (unit.tenants.length === 0) {
+            unit.status = 'vacant';
+        }
+        
+        const updatedUnit = await unit.save({ session });
+
+        // Deactivate PropertyUser association
+        await PropertyUser.findOneAndUpdate(
+            { 
+                user: tenantId, 
+                property: propertyId, 
+                unit: unitId, 
+                roles: PROPERTY_USER_ROLES_ENUM.TENANT,
+                isActive: true
+            },
+            { 
+                $set: { 
+                    isActive: false, 
+                    unit: null, 
+                    endDate: new Date() 
+                } 
+            },
+            { session }
+        );
+        
+        logger.info(`UnitService: Deactivated PropertyUser association for tenant ${tenantUser.email} from unit ${unit.unitName}.`);
+
+        // Notify tenant about removal
+        try {
+            await notificationService.sendNotification({
+                recipientId: tenantId,
+                type: NOTIFICATION_TYPE_ENUM.UNIT_REMOVED,
+                message: `You have been removed from unit ${unit.unitName} in ${property.name}.`,
+                relatedResourceType: AUDIT_RESOURCE_TYPE_ENUM.Unit,
+                relatedResourceId: unitId,
+                emailDetails: {
+                    subject: `Unit Assignment Removed`,
+                    html: `
+                        <p>Hello ${tenantUser.firstName},</p>
+                        <p>You have been removed from unit ${unit.unitName} in ${property.name}.</p>
+                        <p>If you have questions about this change, please contact your property manager.</p>
+                    `,
+                    text: `Hello ${tenantUser.firstName}, You have been removed from unit ${unit.unitName} in ${property.name}. If you have questions about this change, please contact your property manager.`
+                },
+                senderId: currentUser._id
+            }, { session });
+        } catch (notificationError) {
+            logger.warn(`Failed to send unit removal notification: ${notificationError.message}`);
+            // Continue even if notification fails
+        }
+
+        // Create audit log
+        await auditService.logActivity(
+            AUDIT_ACTION_ENUM.REMOVE_TENANT,
+            AUDIT_RESOURCE_TYPE_ENUM.Unit,
+            unitId,
+            {
+                userId: currentUser._id,
+                ipAddress,
+                description: `Tenant ${tenantUser.email} removed from unit ${unit.unitName} by ${currentUser.email}.`,
+                status: 'success',
+                metadata: {
+                    tenantId,
+                    unitId,
+                    propertyId,
+                    statusChanged: updatedUnit.status === 'vacant'
+                },
+                oldValue: { tenantId, unitId, propertyId }
+            },
+            { session }
+        );
+
+        await session.commitTransaction();
+        
+        logger.info(`UnitService: Tenant ${tenantUser.email} removed from unit ${unit.unitName} by ${currentUser.email}.`);
+        
+        // Return populated unit
+        return Unit.findById(updatedUnit._id)
+            .populate('property', 'name address')
+            .populate('tenants', 'firstName lastName email avatar')
+            .populate('unitImages');
+    } catch (error) {
+        await session.abortTransaction();
+        
+        logger.error(`UnitService - Error removing tenant from unit: ${error.message}`, {
+            userId: currentUser?._id,
+            propertyId,
+            unitId,
+            tenantId
+        });
+        
+        throw error instanceof AppError ? error : new AppError(`Failed to remove tenant from unit: ${error.message}`, 500);
+    } finally {
+        session.endSession();
     }
-
-    // Ensure unit belongs to the property
-    if (unit.property.toString() !== propertyId) {
-        throw new AppError('Unit does not belong to the specified property.', 400);
-    }
-
-    // Authorization: Admin, or Landlord/PM associated with the property
-    const isAuthorized = await checkPropertyManagementPermission(currentUser, propertyId);
-    if (!isAuthorized) {
-        throw new AppError('Not authorized to remove tenants from this unit.', 403);
-    }
-
-    // Check if the tenant is actually assigned to this unit
-    if (!unit.tenants.includes(tenantId)) {
-        throw new AppError('Tenant is not assigned to this unit.', 400);
-    }
-
-    // Remove tenant from the Unit's tenants array
-    unit.tenants.pull(tenantId);
-    const updatedUnit = await unit.save();
-
-    // Deactivate or remove the specific PropertyUser association for this unit
-    // We'll mark it inactive and set unit to null, allowing for future re-assignment to another unit
-    await PropertyUser.findOneAndUpdate(
-        { user: tenantId, property: propertyId, unit: unitId, roles: PROPERTY_USER_ROLES_ENUM.TENANT },
-        { $set: { isActive: false, unit: null, endDate: new Date() } }
-    );
-    logger.info(`UnitService: Deactivated PropertyUser association for tenant ${tenantUser.email} from unit ${unit.unitName}.`);
-
-
-    // Send notification to the tenant
-    await createInAppNotification(
-        tenantId,
-        NOTIFICATION_TYPE_ENUM.find(t => t === 'unit_removed'),
-        `You have been removed from unit ${unit.unitName} in ${property.name}.`,
-        { kind: AUDIT_RESOURCE_TYPE_ENUM.Unit, item: unitId },
-        null, // No specific link might be needed if they are removed
-        { unitName: unit.unitName, propertyName: property.name },
-        currentUser._id
-    );
-
-    await createAuditLog({
-        action: AUDIT_ACTION_ENUM.REMOVE_TENANT,
-        user: currentUser._id,
-        resourceType: AUDIT_RESOURCE_TYPE_ENUM.Unit,
-        resourceId: unitId,
-        newValue: { tenantId, unitId, propertyId },
-        ipAddress: ipAddress,
-        description: `Tenant ${tenantUser.email} removed from unit ${unit.unitName} by ${currentUser.email}.`,
-        status: 'success'
-    });
-
-    return updatedUnit;
 };
 
 module.exports = {
@@ -554,5 +1136,5 @@ module.exports = {
     updateUnit,
     deleteUnit,
     assignTenantToUnit,
-    removeTenantFromUnit,
+    removeTenantFromUnit
 };

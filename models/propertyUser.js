@@ -1,4 +1,5 @@
-// server/models/propertyUser.js
+// src/models/propertyUser.js
+
 const mongoose = require('mongoose');
 const { PROPERTY_USER_ROLES_ENUM } = require('../utils/constants/enums');
 
@@ -23,12 +24,17 @@ const propertyUserSchema = new mongoose.Schema(
             sparse: true,
             index: true
         },
-        roles: [{
-            type: String,
+        roles: {
+            type: [String],
             enum: PROPERTY_USER_ROLES_ENUM,
             required: [true, 'At least one role is required for PropertyUser association.'],
-            lowercase: true,
-        }],
+            validate: {
+                validator: function(roles) {
+                    return roles && roles.length > 0;
+                },
+                message: 'At least one role must be specified'
+            }
+        },
         invitedBy: {
             type: mongoose.Schema.Types.ObjectId,
             ref: 'User',
@@ -36,7 +42,7 @@ const propertyUserSchema = new mongoose.Schema(
         },
         isActive: {
             type: Boolean,
-            default: true
+            default: true,
         },
         startDate: {
             type: Date,
@@ -49,20 +55,95 @@ const propertyUserSchema = new mongoose.Schema(
         permissions: {
             type: [String],
             default: []
+        },
+        leaseInfo: {
+            leaseId: {
+                type: mongoose.Schema.Types.ObjectId,
+                ref: 'Lease',
+                default: null
+            },
+            leaseStartDate: {
+                type: Date,
+                default: null
+            },
+            leaseEndDate: {
+                type: Date,
+                default: null
+            }
         }
     },
-    { timestamps: true }
+    { 
+        timestamps: true,
+        toJSON: { virtuals: true },
+        toObject: { virtuals: true }
+    }
 );
 
-// Compound index to ensure uniqueness for a given user, property, unit, and *a specific role*
-// Keeping this as is per the previous discussion, recognizing it prevents exact duplicates.
-// If a user can have multiple roles on the *same property/unit* via a *single* PropertyUser entry,
-// this index needs to be 'user: 1, property: 1, unit: 1'. For now, it implies separate entries for distinct roles.
-propertyUserSchema.index({ user: 1, property: 1, unit: 1, roles: 1 }, { unique: true });
+// Prevent duplicate associations
+propertyUserSchema.index({ user: 1, property: 1, unit: 1 }, { unique: true });
 
 // Indexes for fast lookup of users by property, role, or unit
-propertyUserSchema.index({ property: 1, roles: 1 });
-propertyUserSchema.index({ user: 1, roles: 1 });
-propertyUserSchema.index({ isActive: 1 });
+propertyUserSchema.index({ property: 1, 'roles': 1, isActive: 1 });
+propertyUserSchema.index({ user: 1, 'roles': 1, isActive: 1 });
+propertyUserSchema.index({ unit: 1, 'roles': 1, isActive: 1 });
+propertyUserSchema.index({ 'leaseInfo.leaseId': 1 });
+
+// Virtual for lease status
+propertyUserSchema.virtual('isLeaseActive').get(function() {
+    if (!this.leaseInfo.leaseStartDate || !this.leaseInfo.leaseEndDate) return false;
+    const now = new Date();
+    return now >= this.leaseInfo.leaseStartDate && now <= this.leaseInfo.leaseEndDate;
+});
+
+// Helper methods for common queries
+propertyUserSchema.statics.getLandlordsForProperty = async function(propertyId) {
+    return this.find({ 
+        property: propertyId, 
+        roles: PROPERTY_USER_ROLES_ENUM.LANDLORD,
+        isActive: true 
+    }).populate('user');
+};
+
+propertyUserSchema.statics.getPropertyManagersForProperty = async function(propertyId) {
+    return this.find({ 
+        property: propertyId, 
+        roles: PROPERTY_USER_ROLES_ENUM.PROPERTY_MANAGER,
+        isActive: true 
+    }).populate('user');
+};
+
+propertyUserSchema.statics.getTenantsForUnit = async function(unitId) {
+    return this.find({ 
+        unit: unitId, 
+        roles: PROPERTY_USER_ROLES_ENUM.TENANT,
+        isActive: true 
+    }).populate('user');
+};
+
+propertyUserSchema.statics.getUserRolesForProperty = async function(userId, propertyId) {
+    const propertyUser = await this.findOne({
+        user: userId,
+        property: propertyId,
+        isActive: true
+    });
+    
+    return propertyUser ? propertyUser.roles : [];
+};
+
+propertyUserSchema.statics.hasRole = async function(userId, propertyId, role, unitId = null) {
+    const query = {
+        user: userId,
+        property: propertyId,
+        roles: role,
+        isActive: true
+    };
+    
+    if (unitId) {
+        query.unit = unitId;
+    }
+    
+    const count = await this.countDocuments(query);
+    return count > 0;
+};
 
 module.exports = mongoose.models.PropertyUser || mongoose.model('PropertyUser', propertyUserSchema);

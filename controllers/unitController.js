@@ -1,24 +1,18 @@
 // src/controllers/unitController.js
 
-const asyncHandler = require('../utils/asyncHandler'); // For handling async errors
-const unitService = require('../services/unitService'); // Import the new unit service
-const logger = require('../utils/logger'); // Import logger
-const AppError = require('../utils/AppError'); // Import custom AppError
+const asyncHandler = require('../utils/asyncHandler');
+const unitService = require('../services/unitService');
+const logger = require('../utils/logger');
 
 /**
  * @desc Create a new unit within a property
  * @route POST /api/properties/:propertyId/units
  * @access Private (PropertyManager, Landlord, Admin)
- * @param {string} propertyId - ID of the property from URL params
- * @body {string} unitName, {string} [floor], {string} [details], {number} [numBedrooms],
- * {number} [numBathrooms], {number} [squareFootage], {number} [rentAmount], {number} [depositAmount],
- * {string} [status], {string} [utilityResponsibility], {string} [notes], {Date} [lastInspected],
- * {string[]} [unitImages]
  */
 const createUnit = asyncHandler(async (req, res) => {
     const { propertyId } = req.params;
     const unitData = req.body;
-    const currentUser = req.user; // From protect middleware
+    const currentUser = req.user;
     const ipAddress = req.ip;
 
     const newUnit = await unitService.createUnit(propertyId, unitData, currentUser, ipAddress);
@@ -34,29 +28,24 @@ const createUnit = asyncHandler(async (req, res) => {
  * @desc List units for a specific property
  * @route GET /api/properties/:propertyId/units
  * @access Private (with access control)
- * @param {string} propertyId - ID of the property from URL params
- * @query {string} [status] - Filter by unit status
- * @query {number} [numBedrooms] - Filter by number of bedrooms
- * @query {string} [search] - Search by unit name, floor, or details
- * @query {number} [page=1] - Page number
- * @query {number} [limit=10] - Items per page
  */
 const getUnitsForProperty = asyncHandler(async (req, res) => {
     const { propertyId } = req.params;
-    const filters = req.query; // All query parameters are filters
-    const page = req.query.page || 1;
-    const limit = req.query.limit || 10;
+    const filters = req.query;
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
     const currentUser = req.user;
 
-    const { units, total, page: currentPage, limit: currentLimit } = await unitService.getUnitsForProperty(propertyId, currentUser, filters, page, limit);
+    const result = await unitService.getUnitsForProperty(propertyId, currentUser, filters, page, limit);
 
     res.status(200).json({
         success: true,
-        count: units.length,
-        total,
-        page: currentPage,
-        limit: currentLimit,
-        data: units
+        count: result.units.length,
+        total: result.total,
+        page: result.page,
+        limit: result.limit,
+        pages: result.pages,
+        data: result.units
     });
 });
 
@@ -64,18 +53,17 @@ const getUnitsForProperty = asyncHandler(async (req, res) => {
  * @desc Get specific unit details
  * @route GET /api/properties/:propertyId/units/:unitId
  * @access Private (with access control)
- * @param {string} propertyId - ID of the property from URL params
- * @param {string} unitId - ID of the unit from URL params
  */
 const getUnitById = asyncHandler(async (req, res) => {
     const { propertyId, unitId } = req.params;
     const currentUser = req.user;
+    const ipAddress = req.ip;
 
-    const unit = await unitService.getUnitById(propertyId, unitId, currentUser);
+    const unit = await unitService.getUnitById(propertyId, unitId, currentUser, ipAddress);
 
     res.status(200).json({
         success: true,
-        unit: unit
+        unit
     });
 });
 
@@ -83,12 +71,6 @@ const getUnitById = asyncHandler(async (req, res) => {
  * @desc Update unit details
  * @route PUT /api/properties/:propertyId/units/:unitId
  * @access Private (PropertyManager, Landlord, Admin)
- * @param {string} propertyId - ID of the property from URL params
- * @param {string} unitId - ID of the unit from URL params
- * @body {string} [unitName], {string} [floor], {string} [details], {number} [numBedrooms],
- * {number} [numBathrooms], {number} [squareFootage], {number} [rentAmount], {number} [depositAmount],
- * {string} [status], {string} [utilityResponsibility], {string} [notes], {Date} [lastInspected],
- * {string[]} [unitImages]
  */
 const updateUnit = asyncHandler(async (req, res) => {
     const { propertyId, unitId } = req.params;
@@ -109,8 +91,6 @@ const updateUnit = asyncHandler(async (req, res) => {
  * @desc Delete unit
  * @route DELETE /api/properties/:propertyId/units/:unitId
  * @access Private (PropertyManager, Landlord, Admin)
- * @param {string} propertyId - ID of the property from URL params
- * @param {string} unitId - ID of the unit from URL params
  */
 const deleteUnit = asyncHandler(async (req, res) => {
     const { propertyId, unitId } = req.params;
@@ -129,9 +109,6 @@ const deleteUnit = asyncHandler(async (req, res) => {
  * @desc Assign a tenant to a unit
  * @route POST /api/properties/:propertyId/units/:unitId/assign-tenant
  * @access Private (PropertyManager, Landlord, Admin)
- * @param {string} propertyId - ID of the property from URL params
- * @param {string} unitId - ID of the unit from URL params
- * @body {string} tenantId - ID of the tenant User to assign
  */
 const assignTenantToUnit = asyncHandler(async (req, res) => {
     const { propertyId, unitId } = req.params;
@@ -152,9 +129,6 @@ const assignTenantToUnit = asyncHandler(async (req, res) => {
  * @desc Remove a tenant from a unit
  * @route DELETE /api/properties/:propertyId/units/:unitId/remove-tenant/:tenantId
  * @access Private (PropertyManager, Landlord, Admin)
- * @param {string} propertyId - ID of the property from URL params
- * @param {string} unitId - ID of the unit from URL params
- * @param {string} tenantId - ID of the tenant User to remove from URL params
  */
 const removeTenantFromUnit = asyncHandler(async (req, res) => {
     const { propertyId, unitId, tenantId } = req.params;
@@ -177,5 +151,5 @@ module.exports = {
     updateUnit,
     deleteUnit,
     assignTenantToUnit,
-    removeTenantFromUnit,
+    removeTenantFromUnit
 };

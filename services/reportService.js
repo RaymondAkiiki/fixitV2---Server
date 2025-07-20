@@ -720,11 +720,130 @@ const exportReport = async (reportType, filters, user, format) => {
     return { filePath, fileName, mimeType };
 };
 
+/**
+ * Generates a report document using the document generation service.
+ * @param {string} reportType - The type of report to generate as a document.
+ * @param {object} filters - Filters to apply when generating data.
+ * @param {object} user - The user requesting the document.
+ * @param {object} [options={}] - Additional options for document generation.
+ * @returns {Promise<object>} Media document for the generated report.
+ * @throws {AppError} If document generation fails.
+ */
+const generateReportDocument = async (reportType, filters, user, options = {}) => {
+  let documentType;
+  let documentData = {};
+  
+  // Map report type to document type
+  switch (reportType) {
+    case 'maintenance_summary':
+      documentType = 'maintenance_report';
+      const requests = await generateMaintenanceSummaryReport(filters, user);
+      documentData = {
+        reportTitle: 'Maintenance Summary Report',
+        propertyName: filters.propertyId ? (await Property.findById(filters.propertyId))?.name || 'Specified Property' : 'All Properties',
+        startDate: filters.startDate || new Date(new Date().setMonth(new Date().getMonth() - 1)),
+        endDate: filters.endDate || new Date(),
+        generatedBy: `${user.firstName} ${user.lastName}`,
+        requests: requests,
+        summary: {
+          totalRequests: requests.length,
+          completed: requests.filter(r => r.status === 'completed' || r.status === 'verified').length,
+          inProgress: requests.filter(r => r.status === 'in_progress' || r.status === 'assigned').length,
+          new: requests.filter(r => r.status === 'new').length,
+          avgResolutionTime: calculateAverageResolutionTime(requests)
+        }
+      };
+      break;
+      
+    case 'rent_collection':
+      documentType = 'rent_report';
+      const rents = await generateRentCollectionReport(filters, user);
+      const totalDue = rents.reduce((sum, rent) => sum + (rent.amountDue || 0), 0);
+      const totalCollected = rents.reduce((sum, rent) => sum + (rent.amountPaid || 0), 0);
+      
+      documentData = {
+        propertyName: filters.propertyId ? (await Property.findById(filters.propertyId))?.name || 'Specified Property' : 'All Properties',
+        startDate: filters.startDate || new Date(new Date().setMonth(new Date().getMonth() - 1)),
+        endDate: filters.endDate || new Date(),
+        generatedBy: `${user.firstName} ${user.lastName}`,
+        totalDue,
+        totalCollected,
+        currency: 'UGX',
+        rentEntries: rents.map(rent => ({
+          unitName: rent.unitName,
+          tenantName: rent.tenantName,
+          dueDate: rent.dueDate,
+          amountDue: rent.amountDue,
+          amountPaid: rent.amountPaid,
+          status: rent.status
+        })),
+        statusSummary: rents.reduce((summary, rent) => {
+          summary[rent.status] = (summary[rent.status] || 0) + rent.amountDue;
+          return summary;
+        }, {})
+      };
+      break;
+      
+    // Add more report types here as needed
+      
+    default:
+      throw new AppError(`Unsupported report type for document generation: ${reportType}`, 400);
+  }
+  
+  // Enhanced options for document generation
+  const enhancedOptions = {
+    ...options,
+    userId: user._id,
+    userName: `${user.firstName} ${user.lastName}`,
+    relatedResourceType: 'Report'
+  };
+  
+  // Generate and upload the document using document generation service
+  const documentGenerationService = require('./documentGenerationService');
+  const mediaDoc = await documentGenerationService.generateAndUploadDocument(
+    documentType,
+    documentData,
+    enhancedOptions
+  );
+  
+  // Log the report document generation
+  await createAuditLog({
+    action: AUDIT_ACTION_ENUM.GENERATE_REPORT,
+    user: user._id,
+    resourceType: AUDIT_RESOURCE_TYPE_ENUM.Report,
+    resourceId: mediaDoc._id,
+    description: `User ${user.email} generated ${reportType} report document.`,
+    status: 'success',
+    metadata: { reportType, documentType, filters }
+  });
+  
+  return mediaDoc;
+};
+
+/**
+ * Helper function to calculate average resolution time in hours
+ * @param {Array} requests - Array of maintenance requests
+ * @returns {string} Formatted average resolution time
+ */
+const calculateAverageResolutionTime = (requests) => {
+  const resolvedRequests = requests.filter(r => r.resolvedAt && r.createdAt);
+  
+  if (resolvedRequests.length === 0) return 'N/A';
+  
+  const totalHours = resolvedRequests.reduce((sum, req) => {
+    const ms = new Date(req.resolvedAt) - new Date(req.createdAt);
+    return sum + (ms / (1000 * 60 * 60)); // Convert ms to hours
+  }, 0);
+  
+  return `${(totalHours / resolvedRequests.length).toFixed(1)} hours`;
+};
+
 module.exports = {
     generateMaintenanceSummaryReport,
     generateVendorPerformanceReport,
     generateCommonIssuesReport,
     generateRentCollectionReport,
     generateLeaseExpiryReport,
+    generateReportDocument,
     exportReport,
 };
