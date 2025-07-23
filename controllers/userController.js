@@ -1,11 +1,20 @@
 // src/controllers/userController.js
+// STANDARDIZED USER CONTROLLER - Example Template for All Controllers
 
+// Core dependencies
 const asyncHandler = require('../utils/asyncHandler');
-const userService = require('../services/userService');
 const logger = require('../utils/logger');
+const AppError = require('../utils/AppError');
+
+// Service layer
+const userService = require('../services/userService');
+
+// =====================================================
+// PROFILE MANAGEMENT FUNCTIONS
+// =====================================================
 
 /**
- * @desc Get authenticated user's profile
+ * @desc Get authenticated user's own profile
  * @route GET /api/users/profile
  * @access Private
  */
@@ -14,12 +23,12 @@ const getUserProfile = asyncHandler(async (req, res) => {
     
     res.status(200).json({
         success: true,
-        user: userProfile
+        data: userProfile
     });
 });
 
 /**
- * @desc Update authenticated user's profile
+ * @desc Update authenticated user's own profile
  * @route PUT /api/users/profile
  * @access Private
  */
@@ -35,9 +44,13 @@ const updateUserProfile = asyncHandler(async (req, res) => {
     res.status(200).json({
         success: true,
         message: 'Profile updated successfully.',
-        user: updatedUser
+        data: updatedUser
     });
 });
+
+// =====================================================
+// USER MANAGEMENT FUNCTIONS
+// =====================================================
 
 /**
  * @desc Get all users with filtering and pagination
@@ -66,23 +79,7 @@ const getAllUsers = asyncHandler(async (req, res) => {
 });
 
 /**
- * @desc Get user by ID
- * @route GET /api/users/:id
- * @access Private (Admin, Landlord, Property Manager with access control)
- */
-const getUserById = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    
-    const user = await userService.getUserById(id, req.user, req.ip);
-    
-    res.status(200).json({
-        success: true,
-        user
-    });
-});
-
-/**
- * @desc Create a new user
+ * @desc Create a new user manually
  * @route POST /api/users
  * @access Private (Admin, Landlord, Property Manager)
  */
@@ -98,7 +95,23 @@ const createUser = asyncHandler(async (req, res) => {
     res.status(201).json({
         success: true,
         message: 'User created successfully. An email has been sent to set their password.',
-        user: newUser
+        data: newUser
+    });
+});
+
+/**
+ * @desc Get user by ID
+ * @route GET /api/users/:id
+ * @access Private (Admin, Landlord, Property Manager with access control)
+ */
+const getUserById = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    
+    const user = await userService.getUserById(id, req.user, req.ip);
+    
+    res.status(200).json({
+        success: true,
+        data: user
     });
 });
 
@@ -121,7 +134,7 @@ const updateUserById = asyncHandler(async (req, res) => {
     res.status(200).json({
         success: true,
         message: 'User updated successfully.',
-        user: updatedUser
+        data: updatedUser
     });
 });
 
@@ -141,6 +154,10 @@ const deleteUserById = asyncHandler(async (req, res) => {
     });
 });
 
+// =====================================================
+// USER ACTION FUNCTIONS
+// =====================================================
+
 /**
  * @desc Approve a pending user
  * @route PUT /api/users/:id/approve
@@ -154,7 +171,7 @@ const approveUser = asyncHandler(async (req, res) => {
     res.status(200).json({
         success: true,
         message: 'User approved successfully.',
-        user: updatedUser
+        data: updatedUser
     });
 });
 
@@ -172,16 +189,20 @@ const updateUserRole = asyncHandler(async (req, res) => {
     res.status(200).json({
         success: true,
         message: `User role updated to ${updatedUser.role}.`,
-        user: updatedUser
+        data: updatedUser
     });
 });
+
+// =====================================================
+// EXPORT ALL FUNCTIONS
+// =====================================================
 
 module.exports = {
     getUserProfile,
     updateUserProfile,
     getAllUsers,
-    getUserById,
     createUser,
+    getUserById,
     updateUserById,
     deleteUserById,
     approveUser,
