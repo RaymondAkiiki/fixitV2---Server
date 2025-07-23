@@ -2,7 +2,8 @@ const express = require('express');
 const router = express.Router();
 const { protect, authorizeRoles } = require('../middleware/authMiddleware');
 const auditController = require('../controllers/auditLogController');
-const asyncHandler = require('../utils/asyncHandler');
+const { validateMongoId } = require('../utils/validationUtils');
+const { ROLE_ENUM } = require('../utils/constants/enums');
 
 /**
  * @route   GET /api/audit-logs
@@ -12,7 +13,7 @@ const asyncHandler = require('../utils/asyncHandler');
 router.get(
   '/',
   protect,
-  authorizeRoles('admin'),
+  authorizeRoles(ROLE_ENUM.ADMIN),
   auditController.getAuditLogs
 );
 
@@ -24,7 +25,7 @@ router.get(
 router.get(
   '/:id',
   protect,
-  authorizeRoles('admin'),
+  authorizeRoles(ROLE_ENUM.ADMIN),
   auditController.getAuditLogById
 );
 
@@ -36,7 +37,7 @@ router.get(
 router.get(
   '/resources/:resourceType/:resourceId',
   protect,
-  authorizeRoles('admin'),
+  authorizeRoles(ROLE_ENUM.ADMIN),
   auditController.getResourceHistory
 );
 
@@ -50,7 +51,7 @@ router.get(
 router.get(
   '/users/:userId',
   protect,
-  authorizeRoles('admin'),
+  authorizeRoles(ROLE_ENUM.ADMIN),
   asyncHandler(async (req, res) => {
     const options = {
       userId: req.params.userId,
@@ -77,7 +78,7 @@ router.get(
 router.get(
   '/actions/:action',
   protect,
-  authorizeRoles('admin'),
+  authorizeRoles(ROLE_ENUM.ADMIN),
   asyncHandler(async (req, res) => {
     const options = {
       action: req.params.action,
@@ -104,7 +105,7 @@ router.get(
 router.get(
   '/dashboard/summary',
   protect,
-  authorizeRoles('admin'),
+  authorizeRoles(ROLE_ENUM.ADMIN),
   asyncHandler(async (req, res) => {
     // Get date range from query params or default to last 30 days
     const endDate = new Date();

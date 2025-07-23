@@ -105,10 +105,44 @@ const getMediaStats = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * @desc Get all media related to a specific resource
+ * @route GET /api/media/by-resource/:resourceType/:resourceId
+ * @access Private
+ */
+const getMediaByResource = asyncHandler(async (req, res) => {
+  const { resourceType, resourceId } = req.params;
+  const currentUser = req.user;
+  const ipAddress = req.ip;
+
+  const filters = {
+    ...req.query,
+    relatedTo: resourceType,
+    relatedId: resourceId
+  };
+
+  const { media, total, page, limit, totalPages } = await mediaService.getAllMedia(
+    currentUser, 
+    filters,
+    ipAddress
+  );
+
+  res.status(200).json({
+    success: true,
+    count: media.length,
+    total,
+    page,
+    limit,
+    totalPages,
+    data: media
+  });
+});
+
 module.exports = {
   getAllMedia,
   getMediaById,
   updateMedia,
   deleteMedia,
-  getMediaStats
+  getMediaStats,
+  getMediaByResource
 };

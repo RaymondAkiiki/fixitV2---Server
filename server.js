@@ -75,6 +75,7 @@ const dashboardRoutes = require('./routes/dashboardRoutes');
 // =========================================================
 // MOUNT ROUTES - AFTER all general middleware
 // =========================================================
+app.use('/api/public', publicRoutes); // Public routes (no auth required)
 app.use('/api/auth', authRoutes);
 app.use('/api/comments', commentRoutes);
 app.use('/api/documents', documentGenerationRoutes);
