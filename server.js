@@ -70,6 +70,7 @@ const mediaRoutes = require('./routes/mediaRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const auditLogRoutes = require('./routes/auditLogRoutes');
 const frontendLogRoutes = require('./routes/frontendLogRoutes');
+const dashboardRoutes = require('./routes/dashboardRoutes');
 
 // =========================================================
 // MOUNT ROUTES - AFTER all general middleware
@@ -94,6 +95,7 @@ app.use('/api/reports', reportRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/auditlogs', auditLogRoutes);
 app.use('/api', frontendLogRoutes);
+app.use('/api', dashboardRoutes);
 
 // =========================================================
 // GENERAL ENDPOINTS & ERROR HANDLING
