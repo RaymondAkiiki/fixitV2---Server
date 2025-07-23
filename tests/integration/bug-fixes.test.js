@@ -25,7 +25,7 @@ describe('Bug Fixes Integration Tests', () => {
 
         test('RentController should import correctly (case sensitivity fix)', () => {
             expect(() => {
-                const rentController = require('../../controllers/RentController');
+                const rentController = require('../../controllers/rentController');
                 expect(rentController).toBeDefined();
             }).not.toThrow();
         });
