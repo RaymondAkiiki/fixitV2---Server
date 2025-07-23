@@ -1,14 +1,15 @@
-// src/routes/admin.routes.js
+// src/routes/adminRoutes.js
 
 const express = require('express');
 const router = express.Router();
 const adminController = require('../controllers/adminController');
 const { protect, authorizeRoles } = require('../middleware/authMiddleware');
 const { validateUserRegistration } = require('../utils/validationUtils');
+const { ROLE_ENUM } = require('../utils/constants/enums');
 
 // Apply protection middleware to all admin routes
 router.use(protect);
-router.use(authorizeRoles('admin'));
+router.use(authorizeRoles(ROLE_ENUM.ADMIN));
 
 // Dashboard & System Routes
 router.get('/stats', adminController.getDashboardStatistics);
